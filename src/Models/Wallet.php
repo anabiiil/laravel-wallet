@@ -4,11 +4,20 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Models;
 
+use Anabil\Wallet\Contracts\WalletOperation;
 use Anabil\Wallet\Database\WalletBuilder;
+use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Enums\WalletStatus;
+use Anabil\Wallet\Exceptions\BalanceOverflow;
 use Anabil\Wallet\Exceptions\ImmutableWallet;
+use Anabil\Wallet\Exceptions\InsufficientFunds;
+use Anabil\Wallet\Exceptions\InvalidAmount;
+use Anabil\Wallet\Exceptions\InvalidTransaction;
+use Anabil\Wallet\Ledger\Details;
+use Anabil\Wallet\Ledger\LedgerWriter;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\WalletAttributes;
+use BackedEnum;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -96,6 +105,89 @@ class Wallet extends Model
     public function transactions(): HasMany
     {
         return $this->hasMany(Models::transaction(), 'wallet_id');
+    }
+
+    /**
+     * Add money to the wallet and record the ledger entry.
+     *
+     * Everything after $type is best passed by name. $type may be a
+     * WalletOperation, which then supplies the reference, description and
+     * meta itself.
+     *
+     * @param  int  $amount  positive, in minor units
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @throws InvalidAmount when the amount is not positive
+     * @throws InvalidTransaction when the type or details are invalid
+     * @throws BalanceOverflow when the balance would overflow
+     */
+    public function deposit(
+        int $amount,
+        string|BackedEnum|WalletOperation|null $type = null,
+        ?Model $reference = null,
+        ?string $description = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+    ): WalletTransaction {
+        if ($amount <= 0) {
+            throw InvalidAmount::notPositive($amount);
+        }
+
+        $details = Details::from($type, CoreType::Deposit, $reference, $description, $meta, $performedBy);
+
+        return (new LedgerWriter)->record($this, $amount, $details);
+    }
+
+    /**
+     * Take money out of the wallet and record the ledger entry. The minimum
+     * balance is checked against the database row, not this instance.
+     *
+     * Everything after $type is best passed by name. $type may be a
+     * WalletOperation, which then supplies the reference, description and
+     * meta itself.
+     *
+     * @param  int  $amount  positive, in minor units
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @throws InvalidAmount when the amount is not positive
+     * @throws InvalidTransaction when the type or details are invalid
+     * @throws InsufficientFunds when the balance would drop below the minimum balance
+     */
+    public function withdraw(
+        int $amount,
+        string|BackedEnum|WalletOperation|null $type = null,
+        ?Model $reference = null,
+        ?string $description = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+    ): WalletTransaction {
+        if ($amount <= 0) {
+            throw InvalidAmount::notPositive($amount);
+        }
+
+        $details = Details::from($type, CoreType::Withdraw, $reference, $description, $meta, $performedBy);
+
+        return (new LedgerWriter)->record($this, -$amount, $details);
+    }
+
+    /**
+     * How much could be withdrawn right now, according to this instance.
+     *
+     * Advisory only: the values may be stale and another process may spend
+     * the money first. withdraw() checks the database row itself, so
+     * handle InsufficientFunds rather than relying on this.
+     */
+    public function spendable(): int
+    {
+        return max(0, $this->balance - $this->min_balance);
+    }
+
+    /**
+     * Whether spendable() covers the amount. Advisory, like spendable().
+     */
+    public function canWithdraw(int $amount): bool
+    {
+        return $amount > 0 && $amount <= $this->spendable();
     }
 
     /**

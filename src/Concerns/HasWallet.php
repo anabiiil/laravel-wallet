@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Concerns;
 
+use Anabil\Wallet\Contracts\WalletOperation;
 use Anabil\Wallet\Exceptions\InvalidWalletAttribute;
 use Anabil\Wallet\Exceptions\WalletAlreadyExists;
 use Anabil\Wallet\Models\Wallet;
+use Anabil\Wallet\Models\WalletTransaction;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\WalletAttributes;
+use BackedEnum;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -89,6 +92,44 @@ trait HasWallet
         $wallet = $this->findWallet($this->resolveWalletName($name));
 
         return $wallet === null ? 0 : $wallet->balance;
+    }
+
+    /**
+     * Deposit into the default wallet (created on first use). For a named
+     * wallet use $holder->wallet('name')->deposit(...).
+     *
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @see Wallet::deposit()
+     */
+    public function deposit(
+        int $amount,
+        string|BackedEnum|WalletOperation|null $type = null,
+        ?Model $reference = null,
+        ?string $description = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+    ): WalletTransaction {
+        return $this->wallet()->deposit($amount, $type, $reference, $description, $meta, $performedBy);
+    }
+
+    /**
+     * Withdraw from the default wallet (created on first use). For a named
+     * wallet use $holder->wallet('name')->withdraw(...).
+     *
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @see Wallet::withdraw()
+     */
+    public function withdraw(
+        int $amount,
+        string|BackedEnum|WalletOperation|null $type = null,
+        ?Model $reference = null,
+        ?string $description = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+    ): WalletTransaction {
+        return $this->wallet()->withdraw($amount, $type, $reference, $description, $meta, $performedBy);
     }
 
     /**

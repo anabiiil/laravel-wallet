@@ -6,10 +6,13 @@ namespace Anabil\Wallet\Tests;
 
 use Anabil\Wallet\Tests\Fixtures\Admin;
 use Anabil\Wallet\Tests\Fixtures\Merchant;
+use Anabil\Wallet\Tests\Fixtures\Order;
 use Anabil\Wallet\Tests\Fixtures\User;
 use Anabil\Wallet\WalletServiceProvider;
 use Closure;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Orchestra\Testbench\TestCase as Orchestra;
@@ -45,6 +48,9 @@ abstract class TestCase extends Orchestra
             'merchant' => Merchant::class,
             'admin' => Admin::class,
         ]);
+
+        // Transaction references are stored with a morph alias too.
+        Relation::morphMap(['order' => Order::class]);
 
         $connection = env('DB_CONNECTION', 'sqlite');
 
@@ -151,5 +157,47 @@ abstract class TestCase extends Orchestra
         } finally {
             Model::shouldBeStrict(false);
         }
+    }
+
+    /**
+     * Overwrites a wallet's balance directly, bypassing the ledger. Only for
+     * setting up edge cases (e.g. a balance near the integer limit).
+     */
+    protected function forceBalance(int $walletId, int $balance): void
+    {
+        DB::table($this->walletsTable())->where('id', $walletId)->update(['balance' => $balance]);
+    }
+
+    /**
+     * The sum of a wallet's ledger amounts, read without the models.
+     */
+    protected function ledgerSum(int $walletId): int
+    {
+        return (int) DB::table($this->transactionsTable())->where('wallet_id', $walletId)->sum('amount');
+    }
+
+    /**
+     * Runs the callback and returns the SQL of every query it executed.
+     *
+     * @return list<string>
+     */
+    protected function queriesDuring(Closure $callback): array
+    {
+        $queries = [];
+        $listening = true;
+
+        DB::listen(function (QueryExecuted $query) use (&$queries, &$listening): void {
+            if ($listening) {
+                $queries[] = $query->sql;
+            }
+        });
+
+        try {
+            $callback();
+        } finally {
+            $listening = false;
+        }
+
+        return $queries;
     }
 }

@@ -7,7 +7,8 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
 /**
- * Tables for the wallet holder fixtures (User, Merchant, Admin).
+ * Tables for the wallet holder fixtures (User, Merchant, Admin) and the
+ * Order fixture used as a transaction reference.
  */
 return new class extends Migration
 {
@@ -20,10 +21,17 @@ return new class extends Migration
                 $table->timestamps();
             });
         }
+
+        Schema::create('orders', function (Blueprint $table): void {
+            $table->id();
+            $table->timestamps();
+        });
     }
 
     public function down(): void
     {
+        Schema::dropIfExists('orders');
+
         foreach (['users', 'merchants', 'admins'] as $name) {
             Schema::dropIfExists($name);
         }

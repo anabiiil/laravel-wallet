@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Models;
 
+use Anabil\Wallet\Contracts\TransactionType;
 use Anabil\Wallet\Database\WalletTransactionBuilder;
 use Anabil\Wallet\Exceptions\ImmutableTransaction;
 use Anabil\Wallet\Support\Models;
+use Anabil\Wallet\Support\Types;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
@@ -20,9 +23,13 @@ use Illuminate\Support\Carbon;
  * query-level write. The checks live in the persistence internals, not in
  * model events, so quiet saves and Model::withoutEvents() are covered too.
  *
+ * The type attribute reads as a CoreType case, a case of the enum
+ * configured in "wallet.types", or the raw string when neither knows the
+ * stored value; getRawOriginal('type') always returns the stored string.
+ *
  * @property int $id
  * @property int $wallet_id
- * @property string $type
+ * @property-read TransactionType|string $type
  * @property int $amount
  * @property int $balance_after
  * @property string|null $reference_type
@@ -109,6 +116,19 @@ class WalletTransaction extends Model
     public function reversal(): HasOne
     {
         return $this->hasOne(Models::transaction(), 'reverses_id');
+    }
+
+    /**
+     * Read-only: there is no setter, so the stored string is never rewritten
+     * (and the model never saves anyway).
+     *
+     * @return Attribute<TransactionType|string, never>
+     */
+    protected function type(): Attribute
+    {
+        return Attribute::get(
+            fn (mixed $value): TransactionType|string => Types::resolveForRead((string) $value),
+        );
     }
 
     public function isCredit(): bool

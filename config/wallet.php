@@ -49,6 +49,24 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Transaction Types
+    |--------------------------------------------------------------------------
+    |
+    | Set to your own string-backed enum class implementing
+    | Anabil\Wallet\Contracts\TransactionType to use your application's
+    | transaction types (e.g. App\Enums\WalletType::class). Once set, only
+    | its values and the core types are accepted. Leave null to accept any
+    | lowercase string such as "cashback" or "fee.card" (at most 32 chars).
+    |
+    | Its values must not reuse a core type (deposit, withdraw, transfer_in,
+    | transfer_out, reversal).
+    |
+    */
+
+    'types' => null,
+
+    /*
+    |--------------------------------------------------------------------------
     | Holder Types
     |--------------------------------------------------------------------------
     |

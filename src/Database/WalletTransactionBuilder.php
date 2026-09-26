@@ -6,7 +6,10 @@ namespace Anabil\Wallet\Database;
 
 use Anabil\Wallet\Exceptions\ImmutableTransaction;
 use Anabil\Wallet\Models\WalletTransaction;
+use Anabil\Wallet\Support\Types;
+use BackedEnum;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 
 /**
  * Query builder for ledger entries: reads only. Every write is refused,
@@ -17,12 +20,71 @@ use Illuminate\Database\Eloquent\Builder;
  * Those are the plain query builder and sit outside Eloquent; the package's
  * own ledger writer uses them.
  *
+ * It also carries the ledger's query helpers (credits(), debits(),
+ * ofType()...). They are builder methods rather than model scopes, and none
+ * shares a name with a model relation, so they work the same from
+ * WalletTransaction::query() and from $wallet->transactions().
+ *
  * @template TModel of WalletTransaction
  *
  * @extends Builder<TModel>
  */
 class WalletTransactionBuilder extends Builder
 {
+    /**
+     * Entries that added money (positive amount).
+     */
+    public function credits(): static
+    {
+        return $this->where($this->qualifyColumn('amount'), '>', 0);
+    }
+
+    /**
+     * Entries that took money out (negative amount).
+     */
+    public function debits(): static
+    {
+        return $this->where($this->qualifyColumn('amount'), '<', 0);
+    }
+
+    /**
+     * Entries of any of the given types. Enum cases must be CoreType or the
+     * configured enum; strings are matched as stored, so reserved and
+     * retired types can be queried too.
+     */
+    public function ofType(string|BackedEnum ...$types): static
+    {
+        return $this->whereIn(
+            $this->qualifyColumn('type'),
+            array_values(array_unique(array_map(Types::resolveForQuery(...), $types))),
+        );
+    }
+
+    /**
+     * Entries whose reference is the given model.
+     */
+    public function whereReference(Model $model): static
+    {
+        return $this->whereMorphedTo('reference', $model);
+    }
+
+    /**
+     * Entries performed by the given model.
+     */
+    public function wherePerformedBy(Model $model): static
+    {
+        return $this->whereMorphedTo('performedBy', $model);
+    }
+
+    /**
+     * Newest entries first. Ordered by id, the ledger's stable order;
+     * created_at can tie between entries.
+     */
+    public function latestFirst(): static
+    {
+        return $this->orderByDesc($this->qualifyColumn($this->getModel()->getKeyName()));
+    }
+
     /**
      * @param  array<array-key, mixed>  $attributes
      */
