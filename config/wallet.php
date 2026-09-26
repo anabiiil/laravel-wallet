@@ -2,6 +2,9 @@
 
 declare(strict_types=1);
 
+use Anabil\Wallet\Models\Wallet;
+use Anabil\Wallet\Models\WalletTransaction;
+
 return [
 
     /*
@@ -14,6 +17,56 @@ return [
     */
 
     'default_currency' => env('WALLET_DEFAULT_CURRENCY', 'EGP'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Default Wallet Name
+    |--------------------------------------------------------------------------
+    |
+    | A holder may own several named wallets. This is the one returned by
+    | $user->wallet() when no name is given.
+    |
+    */
+
+    'default_wallet' => 'default',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Models
+    |--------------------------------------------------------------------------
+    |
+    | The Eloquent models used for wallets and ledger entries. You may swap
+    | in your own subclasses (to add relations, accessors, scopes...). They
+    | must extend the package models, and they inherit every protection:
+    | balances and ledger rows still cannot be changed through Eloquent.
+    |
+    */
+
+    'models' => [
+        'wallet' => Wallet::class,
+        'transaction' => WalletTransaction::class,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Holder Types
+    |--------------------------------------------------------------------------
+    |
+    | Any model using the HasWallet trait can hold a wallet -- users, admins,
+    | employees, merchants. Aliasing them here stores a short, stable key in
+    | holder_type instead of a fully qualified class name, so you can move or
+    | rename the classes later without rewriting rows.
+    |
+    | These are merged into Laravel's morph map, so aliases the application
+    | already registered are left alone.
+    |
+    */
+
+    'holders' => [
+        // 'user' => App\Models\User::class,
+        // 'admin' => App\Models\Admin::class,
+        // 'merchant' => App\Models\Merchant::class,
+    ],
 
     /*
     |--------------------------------------------------------------------------
