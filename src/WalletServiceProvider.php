@@ -19,6 +19,10 @@ class WalletServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../config/wallet.php' => $this->app->configPath('wallet.php'),
             ], 'wallet-config');
+
+            $this->publishesMigrations([
+                __DIR__.'/../database/migrations' => $this->app->databasePath('migrations'),
+            ], 'wallet-migrations');
         }
     }
 }

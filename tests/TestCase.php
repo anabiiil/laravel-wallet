@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Anabil\Wallet\Tests;
 
 use Anabil\Wallet\WalletServiceProvider;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 /**
@@ -13,12 +14,19 @@ use Orchestra\Testbench\TestCase as Orchestra;
  */
 abstract class TestCase extends Orchestra
 {
+    use RefreshDatabase;
+
     /**
      * @return array<int, class-string>
      */
     protected function getPackageProviders($app): array
     {
         return [WalletServiceProvider::class];
+    }
+
+    protected function defineDatabaseMigrations(): void
+    {
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
     }
 
     protected function defineEnvironment($app): void
