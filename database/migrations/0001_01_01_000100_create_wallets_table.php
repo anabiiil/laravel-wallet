@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Anabil\Wallet\Support\ExactMatch;
 use Anabil\Wallet\Support\MorphKey;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
@@ -17,7 +18,7 @@ return new class extends Migration
             // Not nullable: every wallet belongs to exactly one holder.
             MorphKey::columns($table, 'holder', 'holder', false);
 
-            $table->string('name', 64);
+            ExactMatch::apply($table->string('name', 64), $this->getConnection());
             $table->char('currency', 3);
             $table->bigInteger('balance')->default(0);
             $table->bigInteger('min_balance')->default(0);

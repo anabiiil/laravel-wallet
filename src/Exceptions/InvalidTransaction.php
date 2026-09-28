@@ -11,7 +11,8 @@ use Throwable;
 
 /**
  * Thrown when the details of a deposit / withdrawal (type, reference,
- * description, meta, actor) are not valid. Nothing is written.
+ * description, meta, actor, idempotency key) are not valid. Nothing is
+ * written.
  */
 class InvalidTransaction extends WalletException
 {
@@ -77,6 +78,27 @@ class InvalidTransaction extends WalletException
                 ? ', a plain string, or configure your enum in [wallet.types]'
                 : sprintf(' or a case of the configured enum [%s]', $configured),
         ));
+    }
+
+    public static function emptyIdempotencyKey(): self
+    {
+        return new self(
+            'The idempotency key must not be empty or only whitespace. Pass null to write without idempotency.'
+        );
+    }
+
+    public static function idempotencyKeyTooLong(int $length, int $max): self
+    {
+        return new self(sprintf(
+            'The idempotency key is %d characters long: at most %d are allowed.',
+            $length,
+            $max,
+        ));
+    }
+
+    public static function idempotencyKeyNotUtf8(): self
+    {
+        return new self('The idempotency key must be a valid UTF-8 string.');
     }
 
     public static function reservedType(string $type): self

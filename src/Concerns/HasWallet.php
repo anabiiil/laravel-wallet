@@ -109,8 +109,9 @@ trait HasWallet
         ?string $description = null,
         array $meta = [],
         ?Model $performedBy = null,
+        ?string $idempotencyKey = null,
     ): WalletTransaction {
-        return $this->wallet()->deposit($amount, $type, $reference, $description, $meta, $performedBy);
+        return $this->wallet()->deposit($amount, $type, $reference, $description, $meta, $performedBy, $idempotencyKey);
     }
 
     /**
@@ -128,8 +129,9 @@ trait HasWallet
         ?string $description = null,
         array $meta = [],
         ?Model $performedBy = null,
+        ?string $idempotencyKey = null,
     ): WalletTransaction {
-        return $this->wallet()->withdraw($amount, $type, $reference, $description, $meta, $performedBy);
+        return $this->wallet()->withdraw($amount, $type, $reference, $description, $meta, $performedBy, $idempotencyKey);
     }
 
     /**

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Anabil\Wallet\Support\ExactMatch;
 use Anabil\Wallet\Support\MorphKey;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
@@ -27,7 +28,7 @@ return new class extends Migration
 
             $table->string('description', 255)->nullable();
             $table->json('meta')->nullable();
-            $table->string('idempotency_key', 128)->nullable();
+            ExactMatch::apply($table->string('idempotency_key', 128)->nullable(), $this->getConnection());
             $table->char('idempotency_hash', 64)->nullable();
             $table->uuid('group_uuid')->nullable();
             $table->unsignedBigInteger('reverses_id')->nullable();

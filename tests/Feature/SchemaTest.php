@@ -88,6 +88,18 @@ function morphProbe(string $type): string
     return 'morph_key_probe';
 }
 
+it('compares wallet names and idempotency keys exactly on every driver', function (): void {
+    $collation = fn (string $table, string $column): ?string => collect(Schema::getColumns($table))
+        ->firstWhere('name', $column)['collation'] ?? null;
+
+    if (! in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
+        $this->markTestSkipped('Only MySQL and MariaDB need a binary collation.');
+    }
+
+    expect($collation(config('wallet.tables.wallets'), 'name'))->toEndWith('_bin')
+        ->and($collation(config('wallet.tables.transactions'), 'idempotency_key'))->toEndWith('_bin');
+});
+
 it('has exactly the expected wallets columns', function (): void {
     $expected = [
         'id', 'holder_type', 'holder_id', 'name', 'currency', 'balance',

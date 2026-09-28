@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Tests;
 
+use Anabil\Wallet\Ledger\Details;
+use Anabil\Wallet\Ledger\Fingerprint;
+use Anabil\Wallet\Models\Wallet;
 use Anabil\Wallet\Tests\Fixtures\Admin;
 use Anabil\Wallet\Tests\Fixtures\Merchant;
 use Anabil\Wallet\Tests\Fixtures\Order;
@@ -174,6 +177,43 @@ abstract class TestCase extends Orchestra
     protected function ledgerSum(int $walletId): int
     {
         return (int) DB::table($this->transactionsTable())->where('wallet_id', $walletId)->sum('amount');
+    }
+
+    /**
+     * Simulates a concurrent request winning an idempotency race: $competitor
+     * runs once, right after the first query that looks up an idempotency
+     * key, i.e. between our lookup and our write.
+     */
+    protected function afterIdempotencyLookup(Closure $competitor): void
+    {
+        $fired = false;
+
+        DB::listen(function (QueryExecuted $query) use (&$fired, $competitor): void {
+            if (! $fired
+                && str_starts_with(strtolower($query->sql), 'select')
+                && str_contains($query->sql, 'idempotency_key')) {
+                $fired = true;
+                $competitor();
+            }
+        });
+    }
+
+    /**
+     * Records an entry the way a competing request would have (balance
+     * change plus ledger row with the key), bypassing the package. The
+     * fingerprint is computed for $delta / $details unless $hash is given.
+     */
+    protected function competingEntry(Wallet $wallet, int $delta, Details $details, string $key, ?string $hash = null): int
+    {
+        DB::table($this->walletsTable())->where('id', $wallet->id)->increment('balance', $delta);
+
+        return $this->insertTransactionRow($wallet->id, [
+            'type' => $details->type,
+            'amount' => $delta,
+            'balance_after' => (int) DB::table($this->walletsTable())->where('id', $wallet->id)->value('balance'),
+            'idempotency_key' => $key,
+            'idempotency_hash' => $hash ?? Fingerprint::for($delta, $details),
+        ]);
     }
 
     /**

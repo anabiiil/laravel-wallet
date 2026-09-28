@@ -9,6 +9,7 @@ use Anabil\Wallet\Database\WalletBuilder;
 use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Enums\WalletStatus;
 use Anabil\Wallet\Exceptions\BalanceOverflow;
+use Anabil\Wallet\Exceptions\IdempotencyConflict;
 use Anabil\Wallet\Exceptions\ImmutableWallet;
 use Anabil\Wallet\Exceptions\InsufficientFunds;
 use Anabil\Wallet\Exceptions\InvalidAmount;
@@ -114,12 +115,19 @@ class Wallet extends Model
      * WalletOperation, which then supplies the reference, description and
      * meta itself.
      *
+     * With an $idempotencyKey (at most 128 characters, unique per wallet),
+     * repeating the same call returns the entry recorded the first time
+     * instead of writing again; reusing the key for a different operation
+     * throws IdempotencyConflict. A replay does not change this instance:
+     * refresh() it to read the current balance.
+     *
      * @param  int  $amount  positive, in minor units
      * @param  array<array-key, mixed>  $meta
      *
      * @throws InvalidAmount when the amount is not positive
-     * @throws InvalidTransaction when the type or details are invalid
+     * @throws InvalidTransaction when the type, details or idempotency key are invalid
      * @throws BalanceOverflow when the balance would overflow
+     * @throws IdempotencyConflict when the key was already used on this wallet for a different operation
      */
     public function deposit(
         int $amount,
@@ -128,6 +136,7 @@ class Wallet extends Model
         ?string $description = null,
         array $meta = [],
         ?Model $performedBy = null,
+        ?string $idempotencyKey = null,
     ): WalletTransaction {
         if ($amount <= 0) {
             throw InvalidAmount::notPositive($amount);
@@ -135,7 +144,7 @@ class Wallet extends Model
 
         $details = Details::from($type, CoreType::Deposit, $reference, $description, $meta, $performedBy);
 
-        return (new LedgerWriter)->record($this, $amount, $details);
+        return (new LedgerWriter)->record($this, $amount, $details, $idempotencyKey);
     }
 
     /**
@@ -146,12 +155,19 @@ class Wallet extends Model
      * WalletOperation, which then supplies the reference, description and
      * meta itself.
      *
+     * With an $idempotencyKey (at most 128 characters, unique per wallet),
+     * repeating the same call returns the entry recorded the first time
+     * instead of writing again; reusing the key for a different operation
+     * throws IdempotencyConflict. A replay does not change this instance:
+     * refresh() it to read the current balance.
+     *
      * @param  int  $amount  positive, in minor units
      * @param  array<array-key, mixed>  $meta
      *
      * @throws InvalidAmount when the amount is not positive
-     * @throws InvalidTransaction when the type or details are invalid
+     * @throws InvalidTransaction when the type, details or idempotency key are invalid
      * @throws InsufficientFunds when the balance would drop below the minimum balance
+     * @throws IdempotencyConflict when the key was already used on this wallet for a different operation
      */
     public function withdraw(
         int $amount,
@@ -160,6 +176,7 @@ class Wallet extends Model
         ?string $description = null,
         array $meta = [],
         ?Model $performedBy = null,
+        ?string $idempotencyKey = null,
     ): WalletTransaction {
         if ($amount <= 0) {
             throw InvalidAmount::notPositive($amount);
@@ -167,7 +184,7 @@ class Wallet extends Model
 
         $details = Details::from($type, CoreType::Withdraw, $reference, $description, $meta, $performedBy);
 
-        return (new LedgerWriter)->record($this, -$amount, $details);
+        return (new LedgerWriter)->record($this, -$amount, $details, $idempotencyKey);
     }
 
     /**
