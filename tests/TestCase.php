@@ -4,20 +4,18 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Tests;
 
+use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Ledger\Details;
 use Anabil\Wallet\Ledger\Fingerprint;
 use Anabil\Wallet\Models\Wallet;
-use Anabil\Wallet\Tests\Fixtures\Admin;
-use Anabil\Wallet\Tests\Fixtures\Merchant;
-use Anabil\Wallet\Tests\Fixtures\Order;
-use Anabil\Wallet\Tests\Fixtures\User;
+use Anabil\Wallet\Tests\Concerns\ConfiguresWalletEnvironment;
 use Anabil\Wallet\WalletServiceProvider;
 use Closure;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 /**
@@ -26,6 +24,7 @@ use Orchestra\Testbench\TestCase as Orchestra;
  */
 abstract class TestCase extends Orchestra
 {
+    use ConfiguresWalletEnvironment;
     use RefreshDatabase;
 
     /**
@@ -46,49 +45,7 @@ abstract class TestCase extends Orchestra
 
     protected function defineEnvironment($app): void
     {
-        $app['config']->set('wallet.holders', [
-            'user' => User::class,
-            'merchant' => Merchant::class,
-            'admin' => Admin::class,
-        ]);
-
-        // Transaction references are stored with a morph alias too.
-        Relation::morphMap(['order' => Order::class]);
-
-        $connection = env('DB_CONNECTION', 'sqlite');
-
-        $app['config']->set('database.default', $connection);
-
-        $app['config']->set('database.connections.sqlite', [
-            'driver' => 'sqlite',
-            'database' => ':memory:',
-            'prefix' => '',
-            'foreign_key_constraints' => true,
-        ]);
-
-        $app['config']->set('database.connections.mysql', [
-            'driver' => 'mysql',
-            'host' => env('DB_HOST', '127.0.0.1'),
-            'port' => env('DB_PORT', '3306'),
-            'database' => env('DB_DATABASE', 'wallet'),
-            'username' => env('DB_USERNAME', 'root'),
-            'password' => env('DB_PASSWORD', ''),
-            'charset' => 'utf8mb4',
-            'collation' => 'utf8mb4_unicode_ci',
-            'prefix' => '',
-            'strict' => true,
-        ]);
-
-        $app['config']->set('database.connections.pgsql', [
-            'driver' => 'pgsql',
-            'host' => env('DB_HOST', '127.0.0.1'),
-            'port' => env('DB_PORT', '5432'),
-            'database' => env('DB_DATABASE', 'wallet'),
-            'username' => env('DB_USERNAME', 'postgres'),
-            'password' => env('DB_PASSWORD', 'postgres'),
-            'charset' => 'utf8',
-            'prefix' => '',
-        ]);
+        $this->configureWalletEnvironment($app);
     }
 
     protected function walletsTable(): string
@@ -214,6 +171,65 @@ abstract class TestCase extends Orchestra
             'idempotency_key' => $key,
             'idempotency_hash' => $hash ?? Fingerprint::for($delta, $details),
         ]);
+    }
+
+    /**
+     * The fingerprint a transfer stores on its sender entry.
+     *
+     * @param  array<array-key, mixed>  $meta
+     */
+    protected function transferFingerprint(
+        Wallet $recipient,
+        int $amount,
+        ?Model $reference = null,
+        ?string $description = null,
+        ?string $recipientDescription = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+    ): string {
+        return Fingerprint::for(
+            -$amount,
+            Details::internal(CoreType::TransferOut, $reference, $description, $meta, $performedBy),
+            [
+                'operation' => 'transfer',
+                'recipient_wallet' => (string) $recipient->id,
+                'recipient_description' => $recipientDescription ?? $description,
+            ],
+        );
+    }
+
+    /**
+     * Records a complete transfer the way a competing request would have
+     * (both balance changes plus both ledger rows, the key on the sender's),
+     * bypassing the package. Returns the ids of the sender and recipient
+     * rows.
+     *
+     * @return array{int, int}
+     */
+    protected function competingTransfer(Wallet $sender, Wallet $recipient, int $amount, string $key, ?string $hash = null): array
+    {
+        $group = (string) Str::uuid7();
+
+        DB::table($this->walletsTable())->where('id', $sender->id)->decrement('balance', $amount);
+        DB::table($this->walletsTable())->where('id', $recipient->id)->increment('balance', $amount);
+
+        $out = $this->insertTransactionRow($sender->id, [
+            'type' => 'transfer_out',
+            'amount' => -$amount,
+            'balance_after' => (int) DB::table($this->walletsTable())->where('id', $sender->id)->value('balance'),
+            'idempotency_key' => $key,
+            'idempotency_hash' => $hash ?? $this->transferFingerprint($recipient, $amount),
+            'group_uuid' => $group,
+        ]);
+
+        $in = $this->insertTransactionRow($recipient->id, [
+            'type' => 'transfer_in',
+            'amount' => $amount,
+            'balance_after' => (int) DB::table($this->walletsTable())->where('id', $recipient->id)->value('balance'),
+            'group_uuid' => $group,
+        ]);
+
+        return [$out, $in];
     }
 
     /**

@@ -64,6 +64,42 @@ final readonly class Details
             $type = $type->type();
         }
 
+        return self::validated(Types::resolveForWrite($type ?? $default), $reference, $description, $meta, $performedBy);
+    }
+
+    /**
+     * Validates the details of an entry the package writes itself (e.g. the
+     * legs of a transfer), which may use the reserved core types. Applies
+     * the same rules as from() to the description, meta and models.
+     *
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @throws InvalidTransaction
+     *
+     * @internal
+     */
+    public static function internal(
+        CoreType $type,
+        ?Model $reference = null,
+        ?string $description = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+    ): self {
+        return self::validated(Types::resolveForWrite($type, internal: true), $reference, $description, $meta, $performedBy);
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @throws InvalidTransaction
+     */
+    private static function validated(
+        string $type,
+        ?Model $reference,
+        ?string $description,
+        array $meta,
+        ?Model $performedBy,
+    ): self {
         if ($description !== null && trim($description) === '') {
             $description = null;
         }
@@ -81,13 +117,7 @@ final readonly class Details
         self::assertPersisted('reference', $reference);
         self::assertPersisted('performedBy', $performedBy);
 
-        return new self(
-            Types::resolveForWrite($type ?? $default),
-            $reference,
-            $description,
-            $meta,
-            $performedBy,
-        );
+        return new self($type, $reference, $description, $meta, $performedBy);
     }
 
     private static function assertPersisted(string $role, ?Model $model): void

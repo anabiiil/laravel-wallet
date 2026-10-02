@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace Anabil\Wallet\Concerns;
 
 use Anabil\Wallet\Contracts\WalletOperation;
+use Anabil\Wallet\Exceptions\InvalidTransfer;
 use Anabil\Wallet\Exceptions\InvalidWalletAttribute;
 use Anabil\Wallet\Exceptions\WalletAlreadyExists;
 use Anabil\Wallet\Models\Wallet;
 use Anabil\Wallet\Models\WalletTransaction;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\WalletAttributes;
+use Anabil\Wallet\TransferResult;
 use BackedEnum;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
@@ -132,6 +134,53 @@ trait HasWallet
         ?string $idempotencyKey = null,
     ): WalletTransaction {
         return $this->wallet()->withdraw($amount, $type, $reference, $description, $meta, $performedBy, $idempotencyKey);
+    }
+
+    /**
+     * Transfer from the default wallet (created on first use) to another
+     * wallet, or to the default wallet of another holder (created on first
+     * use). For a named wallet use $holder->wallet('name')->transferTo(...).
+     *
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @throws InvalidTransfer when the recipient model does not hold wallets
+     *
+     * @see Wallet::transferTo()
+     */
+    public function transferTo(
+        Model|Wallet $recipient,
+        int $amount,
+        ?Model $reference = null,
+        ?string $description = null,
+        ?string $recipientDescription = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+        ?string $idempotencyKey = null,
+    ): TransferResult {
+        if (! $recipient instanceof Wallet) {
+            if (! in_array(HasWallet::class, class_uses_recursive($recipient), true) || ! method_exists($recipient, 'wallet')) {
+                throw InvalidTransfer::recipientHoldsNoWallet($recipient);
+            }
+
+            $wallet = $recipient->wallet();
+
+            if (! $wallet instanceof Wallet) {
+                throw InvalidTransfer::recipientHoldsNoWallet($recipient);
+            }
+
+            $recipient = $wallet;
+        }
+
+        return $this->wallet()->transferTo(
+            $recipient,
+            $amount,
+            $reference,
+            $description,
+            $recipientDescription,
+            $meta,
+            $performedBy,
+            $idempotencyKey,
+        );
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Database;
 
+use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Exceptions\ImmutableTransaction;
 use Anabil\Wallet\Models\WalletTransaction;
 use Anabil\Wallet\Support\Types;
@@ -58,6 +59,14 @@ class WalletTransactionBuilder extends Builder
             $this->qualifyColumn('type'),
             array_values(array_unique(array_map(Types::resolveForQuery(...), $types))),
         );
+    }
+
+    /**
+     * Both legs of transfers: transfer_in and transfer_out entries.
+     */
+    public function transfers(): static
+    {
+        return $this->ofType(CoreType::TransferIn, CoreType::TransferOut);
     }
 
     /**

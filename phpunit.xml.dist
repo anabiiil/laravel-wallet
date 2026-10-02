@@ -8,7 +8,12 @@
          failOnRisky="true">
     <testsuites>
         <testsuite name="Wallet Test Suite">
-            <directory>tests</directory>
+            <directory>tests/Feature</directory>
+        </testsuite>
+        <!-- Real multi-process tests (pcntl_fork, committed data). Runs with
+             the rest by default; select it alone with testsuite "Concurrency". -->
+        <testsuite name="Concurrency">
+            <directory>tests/Concurrency</directory>
         </testsuite>
     </testsuites>
     <source>

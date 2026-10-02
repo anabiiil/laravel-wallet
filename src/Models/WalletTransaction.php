@@ -6,6 +6,7 @@ namespace Anabil\Wallet\Models;
 
 use Anabil\Wallet\Contracts\TransactionType;
 use Anabil\Wallet\Database\WalletTransactionBuilder;
+use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Exceptions\ImmutableTransaction;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\Types;
@@ -129,6 +130,40 @@ class WalletTransaction extends Model
         return Attribute::get(
             fn (mixed $value): TransactionType|string => Types::resolveForRead((string) $value),
         );
+    }
+
+    /**
+     * The other entry of the same operation (for a transfer: the
+     * recipient's entry of a transfer_out, the sender's of a transfer_in),
+     * or null when this entry is not part of a group. Read on this entry's
+     * connection; not cached.
+     */
+    public function counterpart(): ?WalletTransaction
+    {
+        $group = $this->getAttribute('group_uuid');
+
+        if ($group === null || $group === '') {
+            return null;
+        }
+
+        $query = $this->newQuery()
+            ->where('group_uuid', $group)
+            ->whereKeyNot($this->getKey())
+            ->orderBy($this->getKeyName());
+
+        // A transfer leg's counterpart is the opposite transfer leg, even
+        // once other entries (e.g. fees) share the group.
+        $counterType = match ($this->getRawOriginal('type') ?? $this->getAttributes()['type'] ?? null) {
+            CoreType::TransferOut->value => CoreType::TransferIn,
+            CoreType::TransferIn->value => CoreType::TransferOut,
+            default => null,
+        };
+
+        if ($counterType !== null) {
+            $query->ofType($counterType);
+        }
+
+        return $query->first();
     }
 
     public function isCredit(): bool

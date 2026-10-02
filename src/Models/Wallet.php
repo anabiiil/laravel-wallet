@@ -14,10 +14,12 @@ use Anabil\Wallet\Exceptions\ImmutableWallet;
 use Anabil\Wallet\Exceptions\InsufficientFunds;
 use Anabil\Wallet\Exceptions\InvalidAmount;
 use Anabil\Wallet\Exceptions\InvalidTransaction;
+use Anabil\Wallet\Exceptions\InvalidTransfer;
 use Anabil\Wallet\Ledger\Details;
 use Anabil\Wallet\Ledger\LedgerWriter;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\WalletAttributes;
+use Anabil\Wallet\TransferResult;
 use BackedEnum;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
@@ -185,6 +187,55 @@ class Wallet extends Model
         $details = Details::from($type, CoreType::Withdraw, $reference, $description, $meta, $performedBy);
 
         return (new LedgerWriter)->record($this, -$amount, $details, $idempotencyKey);
+    }
+
+    /**
+     * Move money from this wallet to another one, of any holder: a
+     * transfer_out entry here and a transfer_in entry on the recipient,
+     * written together or not at all. Both wallets must use the same
+     * currency and database connection.
+     *
+     * Everything after $amount is best passed by name. $description goes on
+     * this wallet's entry and $recipientDescription on the recipient's
+     * (it defaults to $description); the reference, meta and actor go on
+     * both.
+     *
+     * With an $idempotencyKey (at most 128 characters, unique per sending
+     * wallet), repeating the same call returns the transfer recorded the
+     * first time (TransferResult::replayed() is true) instead of writing
+     * again; reusing the key for a different operation throws
+     * IdempotencyConflict. The key is stored on this wallet's entry only.
+     * A replay does not change either instance: refresh() them to read the
+     * current balances.
+     *
+     * @param  int  $amount  positive, in minor units
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @throws InvalidAmount when the amount is not positive
+     * @throws InvalidTransaction when the details or idempotency key are invalid
+     * @throws InvalidTransfer when the recipient is this wallet or uses another currency or connection
+     * @throws InsufficientFunds when this wallet would drop below its minimum balance
+     * @throws BalanceOverflow when the recipient's balance would overflow
+     * @throws IdempotencyConflict when the key was already used on this wallet for a different operation
+     */
+    public function transferTo(
+        Wallet $recipient,
+        int $amount,
+        ?Model $reference = null,
+        ?string $description = null,
+        ?string $recipientDescription = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+        ?string $idempotencyKey = null,
+    ): TransferResult {
+        if ($amount <= 0) {
+            throw InvalidAmount::notPositive($amount);
+        }
+
+        $out = Details::internal(CoreType::TransferOut, $reference, $description, $meta, $performedBy);
+        $in = Details::internal(CoreType::TransferIn, $reference, $recipientDescription ?? $description, $meta, $performedBy);
+
+        return (new LedgerWriter)->transfer($this, $recipient, $amount, $out, $in, $idempotencyKey);
     }
 
     /**
