@@ -12,7 +12,7 @@ use Anabil\Wallet\Tests\Fixtures\User;
 
 beforeEach(function (): void {
     $this->wallet = User::create(['name' => 'Ada'])->wallet();
-    $this->wallet->deposit(1_000_00);
+    $this->wallet->deposit(1000);
     $this->admin = Admin::create(['name' => 'Root']);
     $this->order = Order::create();
     $this->baseline = count($this->transactionRows());
@@ -20,7 +20,7 @@ beforeEach(function (): void {
 
 it('stores the details given as named arguments', function (): void {
     $tx = $this->wallet->withdraw(
-        25_00,
+        25,
         'fee.card',
         reference: $this->order,
         description: 'Card fee',
@@ -46,7 +46,7 @@ it('stores the details given as named arguments', function (): void {
 it('takes the details from a WalletOperation', function (): void {
     config(['wallet.types' => AppType::class]);
 
-    $tx = $this->wallet->withdraw(10_00, new OrderPayment($this->order));
+    $tx = $this->wallet->withdraw(10, new OrderPayment($this->order));
 
     $row = $this->transactionRows()[$this->baseline];
 
@@ -63,7 +63,7 @@ it('takes the details from a WalletOperation', function (): void {
 it('accepts performedBy alongside an operation', function (): void {
     config(['wallet.types' => AppType::class]);
 
-    $tx = $this->wallet->withdraw(10_00, new OrderPayment($this->order), performedBy: $this->admin);
+    $tx = $this->wallet->withdraw(10, new OrderPayment($this->order), performedBy: $this->admin);
 
     expect($tx->performed_by_type)->toBe('admin')
         ->and($tx->performed_by_id)->toBe($this->admin->id)
@@ -79,7 +79,7 @@ it('refuses details passed alongside an operation', function (string $argument):
         'meta' => ['meta' => ['x' => 1]],
     ][$argument];
 
-    expect(fn () => $this->wallet->withdraw(10_00, new OrderPayment($this->order), ...$extra))
+    expect(fn () => $this->wallet->withdraw(10, new OrderPayment($this->order), ...$extra))
         ->toThrow(InvalidTransaction::class, 'already provides');
 
     expect($this->transactionRows())->toHaveCount($this->baseline);
@@ -88,30 +88,30 @@ it('refuses details passed alongside an operation', function (string $argument):
 it('refuses unsaved models', function (string $role): void {
     $args = [$role => new Order];
 
-    expect(fn () => $this->wallet->deposit(100, ...$args))
+    expect(fn () => $this->wallet->deposit(1, ...$args))
         ->toThrow(InvalidTransaction::class, "The {$role} model");
 
     expect($this->transactionRows())->toHaveCount($this->baseline);
 })->with(['reference', 'performedBy']);
 
 it('refuses a description longer than 255 characters', function (): void {
-    expect(fn () => $this->wallet->deposit(100, description: str_repeat('é', 256)))
+    expect(fn () => $this->wallet->deposit(1, description: str_repeat('é', 256)))
         ->toThrow(InvalidTransaction::class, '256 characters');
 
-    $tx = $this->wallet->deposit(100, description: str_repeat('é', 255));
+    $tx = $this->wallet->deposit(1, description: str_repeat('é', 255));
 
     expect(mb_strlen((string) $tx->description))->toBe(255);
 });
 
 it('stores a blank description as null', function (): void {
-    $tx = $this->wallet->deposit(100, description: "  \n ");
+    $tx = $this->wallet->deposit(1, description: "  \n ");
 
     expect($tx->description)->toBeNull()
         ->and($this->transactionRows()[$this->baseline]['description'])->toBeNull();
 });
 
 it('refuses meta that cannot be JSON encoded', function (Closure $meta): void {
-    expect(fn () => $this->wallet->deposit(100, meta: $meta()))
+    expect(fn () => $this->wallet->deposit(1, meta: $meta()))
         ->toThrow(InvalidTransaction::class, 'cannot be stored as JSON');
 
     expect($this->transactionRows())->toHaveCount($this->baseline);
@@ -123,13 +123,13 @@ it('refuses meta that cannot be JSON encoded', function (Closure $meta): void {
 ]);
 
 it('stores empty meta as NULL', function (): void {
-    $tx = $this->wallet->deposit(100, meta: []);
+    $tx = $this->wallet->deposit(1, meta: []);
 
     expect($tx->meta)->toBeNull()
         ->and($this->transactionRows()[$this->baseline]['meta'])->toBeNull();
 });
 
 it('uses the default core types', function (): void {
-    expect($this->wallet->deposit(1)->getRawOriginal('type'))->toBe(CoreType::Deposit->value)
-        ->and($this->wallet->withdraw(1)->getRawOriginal('type'))->toBe(CoreType::Withdraw->value);
+    expect($this->wallet->deposit('0.01')->getRawOriginal('type'))->toBe(CoreType::Deposit->value)
+        ->and($this->wallet->withdraw('0.01')->getRawOriginal('type'))->toBe(CoreType::Withdraw->value);
 });

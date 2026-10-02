@@ -8,6 +8,8 @@ use Anabil\Wallet\Contracts\TransactionType;
 use Anabil\Wallet\Database\WalletTransactionBuilder;
 use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Exceptions\ImmutableTransaction;
+use Anabil\Wallet\Exceptions\WalletException;
+use Anabil\Wallet\Support\Amount;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\Types;
 use Illuminate\Database\Eloquent\Builder;
@@ -28,11 +30,18 @@ use Illuminate\Support\Carbon;
  * configured in "wallet.types", or the raw string when neither knows the
  * stored value; getRawOriginal('type') always returns the stored string.
  *
+ * amount and balance_after are stored as integers in minor units and read
+ * as decimal strings with the wallet's scale ("-30.00"); amountInMinor() and
+ * balanceAfterInMinor() return the stored integers. The scale comes from
+ * the wallet relation, which is therefore always eager loaded ($with); the
+ * entries the package returns, and those read through
+ * $wallet->transactions(), already carry their wallet.
+ *
  * @property int $id
  * @property int $wallet_id
  * @property-read TransactionType|string $type
- * @property int $amount
- * @property int $balance_after
+ * @property-read string $amount
+ * @property-read string $balance_after
  * @property string|null $reference_type
  * @property int|string|null $reference_id
  * @property string|null $performed_by_type
@@ -58,13 +67,18 @@ class WalletTransaction extends Model
     protected $fillable = [];
 
     /**
+     * The wallet holds the scale the amounts are read with.
+     *
+     * @var list<string>
+     */
+    protected $with = ['wallet'];
+
+    /**
      * @return array<string, string>
      */
     protected function casts(): array
     {
         return [
-            'amount' => 'integer',
-            'balance_after' => 'integer',
             'meta' => 'array',
             'created_at' => 'datetime',
         ];
@@ -133,6 +147,43 @@ class WalletTransaction extends Model
     }
 
     /**
+     * Read-only, as a decimal string with the wallet's scale: negative for a
+     * debit.
+     *
+     * @return Attribute<string, never>
+     */
+    protected function amount(): Attribute
+    {
+        return Attribute::get(fn (mixed $value): string => Amount::format(self::rawMinor($value), $this->scale()));
+    }
+
+    /**
+     * Read-only, as a decimal string with the wallet's scale.
+     *
+     * @return Attribute<string, never>
+     */
+    protected function balanceAfter(): Attribute
+    {
+        return Attribute::get(fn (mixed $value): string => Amount::format(self::rawMinor($value), $this->scale()));
+    }
+
+    /**
+     * The amount as stored: a signed integer in minor units.
+     */
+    public function amountInMinor(): int
+    {
+        return self::rawMinor($this->attributes['amount'] ?? 0);
+    }
+
+    /**
+     * The balance after this entry as stored: an integer in minor units.
+     */
+    public function balanceAfterInMinor(): int
+    {
+        return self::rawMinor($this->attributes['balance_after'] ?? 0);
+    }
+
+    /**
      * The other entry of the same operation (for a transfer: the
      * recipient's entry of a transfer_out, the sender's of a transfer_in),
      * or null when this entry is not part of a group. Read on this entry's
@@ -168,12 +219,12 @@ class WalletTransaction extends Model
 
     public function isCredit(): bool
     {
-        return $this->amount > 0;
+        return $this->amountInMinor() > 0;
     }
 
     public function isDebit(): bool
     {
-        return $this->amount < 0;
+        return $this->amountInMinor() < 0;
     }
 
     /**
@@ -204,5 +255,33 @@ class WalletTransaction extends Model
     protected function performDeleteOnModel(): never
     {
         throw ImmutableTransaction::cannotDelete($this);
+    }
+
+    /**
+     * The scale of the entry's wallet (loaded lazily if it is not yet).
+     *
+     * @throws WalletException when the wallet cannot be found
+     */
+    private function scale(): int
+    {
+        $wallet = $this->getRelationValue('wallet');
+
+        if (! $wallet instanceof Wallet) {
+            throw new WalletException(sprintf(
+                'Cannot read the amounts of wallet transaction [%s]: its wallet [%s] was not found, and amounts are formatted with its scale.',
+                (string) $this->getKey(),
+                (string) ($this->attributes['wallet_id'] ?? ''),
+            ));
+        }
+
+        return $wallet->scale();
+    }
+
+    /**
+     * A stored integer column as an int, whatever type the driver returned.
+     */
+    private static function rawMinor(mixed $value): int
+    {
+        return is_int($value) ? $value : (is_numeric($value) ? (int) $value : 0);
     }
 }

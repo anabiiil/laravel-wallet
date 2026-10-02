@@ -32,6 +32,17 @@ class InvalidTransfer extends WalletException
         ));
     }
 
+    public static function scaleMismatch(Wallet $sender, Wallet $recipient): self
+    {
+        return new self(sprintf(
+            'Cannot transfer from wallet [%s] (%d decimal places) to wallet [%s] (%d decimal places): both wallets must use the same scale.',
+            (string) $sender->getKey(),
+            $sender->scale(),
+            (string) $recipient->getKey(),
+            $recipient->scale(),
+        ));
+    }
+
     public static function connectionMismatch(Wallet $sender, Wallet $recipient, string $senderConnection, string $recipientConnection): self
     {
         return new self(sprintf(

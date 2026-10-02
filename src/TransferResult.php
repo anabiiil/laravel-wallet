@@ -20,9 +20,10 @@ final readonly class TransferResult
     ) {}
 
     /**
-     * The amount moved, positive, in minor units.
+     * The amount moved, positive, as a decimal string in major units with
+     * the wallets' scale (e.g. "99.99").
      */
-    public function amount(): int
+    public function amount(): string
     {
         return $this->in->amount;
     }

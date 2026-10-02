@@ -15,8 +15,8 @@ class Merchant extends Authenticatable
 
     protected $fillable = ['name'];
 
-    public function walletMinBalance(): int
+    public function walletMinBalance(): int|float|string
     {
-        return -100_00;
+        return -100;
     }
 }

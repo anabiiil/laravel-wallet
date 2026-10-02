@@ -32,6 +32,34 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Decimal Places (Scale)
+    |--------------------------------------------------------------------------
+    |
+    | Amounts are passed and read in major units ("250.50"), but stored as
+    | integers in minor units (25050). The scale is how many decimal places a
+    | wallet uses: 2 or 3. It is copied onto each wallet when it is created
+    | and never changes afterwards, so editing these values later only
+    | affects wallets created from then on; existing balances keep reading
+    | exactly as before.
+    |
+    | "scale" applies to every currency not listed in "currency_scales".
+    |
+    */
+
+    'scale' => 2,
+
+    'currency_scales' => [
+        'KWD' => 3,
+        'BHD' => 3,
+        'OMR' => 3,
+        'JOD' => 3,
+        'TND' => 3,
+        'LYD' => 3,
+        'IQD' => 3,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Models
     |--------------------------------------------------------------------------
     |

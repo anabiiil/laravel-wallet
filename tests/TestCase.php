@@ -80,7 +80,7 @@ abstract class TestCase extends Orchestra
     }
 
     /**
-     * Inserts a ledger row directly, the way the future ledger writer will.
+     * Inserts a ledger row directly (amounts in minor units, as stored).
      *
      * @param  array<string, mixed>  $overrides
      */
@@ -157,8 +157,9 @@ abstract class TestCase extends Orchestra
 
     /**
      * Records an entry the way a competing request would have (balance
-     * change plus ledger row with the key), bypassing the package. The
-     * fingerprint is computed for $delta / $details unless $hash is given.
+     * change plus ledger row with the key), bypassing the package. $delta is
+     * in minor units, as stored. The fingerprint is computed for $delta /
+     * $details unless $hash is given.
      */
     protected function competingEntry(Wallet $wallet, int $delta, Details $details, string $key, ?string $hash = null): int
     {
@@ -174,7 +175,8 @@ abstract class TestCase extends Orchestra
     }
 
     /**
-     * The fingerprint a transfer stores on its sender entry.
+     * The fingerprint a transfer stores on its sender entry ($amount in
+     * minor units).
      *
      * @param  array<array-key, mixed>  $meta
      */
@@ -201,8 +203,8 @@ abstract class TestCase extends Orchestra
     /**
      * Records a complete transfer the way a competing request would have
      * (both balance changes plus both ledger rows, the key on the sender's),
-     * bypassing the package. Returns the ids of the sender and recipient
-     * rows.
+     * bypassing the package ($amount in minor units). Returns the ids of the
+     * sender and recipient rows.
      *
      * @return array{int, int}
      */

@@ -16,6 +16,7 @@ use Anabil\Wallet\Exceptions\InvalidTransfer;
 use Anabil\Wallet\Exceptions\WalletException;
 use Anabil\Wallet\Models\Wallet;
 use Anabil\Wallet\Models\WalletTransaction;
+use Anabil\Wallet\Support\Amount;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\TransferResult;
 use DateTimeInterface;
@@ -50,6 +51,10 @@ use RuntimeException;
  *
  * Writes go through the connection's plain query builder: the Eloquent
  * builders of both models refuse them by design.
+ *
+ * Everything here works in integer minor units (the stored values): the
+ * models convert to and from major units at the edges, and the wallet
+ * instances are read and synced through their raw attributes.
  *
  * In-memory state and outer transactions: after a successful write every
  * wallet instance involved holds its new balance. When the write ran inside
@@ -92,8 +97,8 @@ final class LedgerWriter
     public const TRANSFER_ATTEMPTS = 3;
 
     /**
-     * Applies $delta (positive credit, negative debit) to the wallet and
-     * records the ledger entry.
+     * Applies $delta (in minor units; positive credit, negative debit) to the
+     * wallet and records the ledger entry.
      *
      * @throws InsufficientFunds when a debit would take the balance below the minimum balance
      * @throws BalanceOverflow when a credit would overflow the balance
@@ -131,11 +136,12 @@ final class LedgerWriter
     }
 
     /**
-     * Moves $amount from $sender to $recipient: a transfer_out entry on the
-     * sender and a transfer_in entry on the recipient, sharing a group uuid.
+     * Moves $amount (in minor units) from $sender to $recipient: a
+     * transfer_out entry on the sender and a transfer_in entry on the
+     * recipient, sharing a group uuid.
      *
      * @throws InvalidAmount when the amount is not positive
-     * @throws InvalidTransfer when the wallets are the same or differ in currency or connection
+     * @throws InvalidTransfer when the wallets are the same or differ in currency, scale or connection
      * @throws InsufficientFunds when the sender would drop below its minimum balance
      * @throws BalanceOverflow when the recipient's balance would overflow
      * @throws WalletException when a wallet is not saved or no longer exists
@@ -151,7 +157,7 @@ final class LedgerWriter
         ?string $idempotencyKey = null,
     ): TransferResult {
         if ($amount <= 0) {
-            throw InvalidAmount::notPositive($amount);
+            throw InvalidAmount::notPositive(Amount::format($amount, $sender->scale()));
         }
 
         self::assertSaved($sender);
@@ -211,7 +217,7 @@ final class LedgerWriter
             $timestampColumn = self::timestampColumn($leg->wallet);
 
             $previous[$i] = [
-                (int) $leg->wallet->getAttribute('balance'),
+                $leg->wallet->balanceInMinor(),
                 $timestampColumn,
                 $timestampColumn === null ? null : ($leg->wallet->getAttributes()[$timestampColumn] ?? null),
             ];
@@ -365,8 +371,8 @@ final class LedgerWriter
     }
 
     /**
-     * Checked on the instances, before any query. Currency is fixed once a
-     * wallet exists, so the instance's value can be trusted.
+     * Checked on the instances, before any query. Currency and scale are
+     * fixed once a wallet exists, so the instance's values can be trusted.
      *
      * @throws InvalidTransfer
      */
@@ -387,6 +393,12 @@ final class LedgerWriter
 
         if ($sender->getAttribute('currency') !== $recipient->getAttribute('currency')) {
             throw InvalidTransfer::currencyMismatch($sender, $recipient);
+        }
+
+        // Same currency normally means same scale; a wallet created before
+        // the currency's scale was configured differently would not.
+        if ($sender->scale() !== $recipient->scale()) {
+            throw InvalidTransfer::scaleMismatch($sender, $recipient);
         }
     }
 
@@ -428,13 +440,15 @@ final class LedgerWriter
      * The wallet's entry recorded under the key, read through Eloquent on
      * the wallet's connection. With $lock the read is a locking (shared)
      * read, which sees the latest committed row whatever the isolation
-     * level of an enclosing transaction.
+     * level of an enclosing transaction. The wallet is not eager loaded: a
+     * replay attaches the request's instance.
      */
     private function findByKey(Wallet $wallet, string $key, bool $lock): ?WalletTransaction
     {
         $class = Models::transaction();
 
         $query = (new $class)->setConnection($wallet->getConnectionName())->newQuery()
+            ->without('wallet')
             ->where('wallet_id', $wallet->getKey())
             ->where('idempotency_key', $key);
 
@@ -524,6 +538,7 @@ final class LedgerWriter
         $model = (new $class)->setConnection($out->getConnectionName());
 
         $query = $model->newQuery()
+            ->without('wallet')
             ->where('group_uuid', $group)
             ->where('wallet_id', $recipient->getKey())
             ->where('type', CoreType::TransferIn->value)
@@ -581,6 +596,8 @@ final class LedgerWriter
     /**
      * Puts the committed values on the instance and marks them clean, so a
      * later save() of harmless columns does not trip over a dirty balance.
+     * The balance attribute has no setter: the raw integer is stored and the
+     * accessor formats it on read.
      */
     private function syncWallet(Wallet $wallet, int $balance, ?string $timestampColumn, mixed $timestamp): void
     {
@@ -616,7 +633,7 @@ final class LedgerWriter
 
         try {
             $connection->afterRollBack(function () use ($wallet, $delta, $previousBalance, $timestampColumn, $previousTimestamp, $now): void {
-                $balance = $wallet->getAttribute('balance');
+                $balance = $wallet->getAttributes()['balance'] ?? null;
 
                 $this->syncWallet(
                     $wallet,

@@ -23,7 +23,7 @@ final class Fingerprint
     public const VERSION = 1;
 
     /**
-     * @param  int  $delta  the signed amount (positive credit, negative debit)
+     * @param  int  $delta  the signed amount in minor units (positive credit, negative debit), so 100.5, 100.50 and "100.50" fingerprint the same
      * @param  array<array-key, mixed>  $context  extra operation data, e.g. the counterparty of a transfer
      * @return non-empty-string 64 lowercase hex characters
      */

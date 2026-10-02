@@ -5,12 +5,15 @@ declare(strict_types=1);
 namespace Anabil\Wallet\Concerns;
 
 use Anabil\Wallet\Contracts\WalletOperation;
+use Anabil\Wallet\Exceptions\InvalidAmount;
 use Anabil\Wallet\Exceptions\InvalidTransfer;
 use Anabil\Wallet\Exceptions\InvalidWalletAttribute;
 use Anabil\Wallet\Exceptions\WalletAlreadyExists;
 use Anabil\Wallet\Models\Wallet;
 use Anabil\Wallet\Models\WalletTransaction;
+use Anabil\Wallet\Support\Amount;
 use Anabil\Wallet\Support\Models;
+use Anabil\Wallet\Support\Scales;
 use Anabil\Wallet\Support\WalletAttributes;
 use Anabil\Wallet\TransferResult;
 use BackedEnum;
@@ -22,6 +25,9 @@ use Illuminate\Database\UniqueConstraintViolationException;
  * Lets any Eloquent model hold wallets. Override walletCurrency() and
  * walletMinBalance() on the holder model to change the defaults used when a
  * wallet is created implicitly by wallet().
+ *
+ * Amounts are in major units: passed as an int, a float or a decimal string
+ * (250, 100.5, "100.50") and read back as decimal strings ("250.50").
  *
  * @phpstan-require-extends Model
  */
@@ -63,13 +69,16 @@ trait HasWallet
     }
 
     /**
-     * Explicitly create a wallet.
+     * Explicitly create a wallet. Its scale comes from the config for its
+     * currency; $minBalance is in major units of that scale and may be
+     * negative (a credit line).
      *
      * @param  array<array-key, mixed>  $meta
      *
      * @throws WalletAlreadyExists when the holder already has a wallet with this name
+     * @throws InvalidAmount when the minimum balance is malformed, too precise or too large
      */
-    public function createWallet(string $name, ?string $currency = null, ?int $minBalance = null, array $meta = []): Wallet
+    public function createWallet(string $name, ?string $currency = null, int|float|string|null $minBalance = null, array $meta = []): Wallet
     {
         WalletAttributes::assertName($name);
 
@@ -86,26 +95,30 @@ trait HasWallet
     }
 
     /**
-     * The named wallet's balance in minor units, or 0 when it does not exist.
-     * Never creates a wallet.
+     * The named wallet's balance as a decimal string ("250.50"), or zero
+     * ("0.00") when it does not exist, formatted with the scale the
+     * holder's default currency would get. Never creates a wallet.
      */
-    public function balance(?string $name = null): int
+    public function balance(?string $name = null): string
     {
         $wallet = $this->findWallet($this->resolveWalletName($name));
 
-        return $wallet === null ? 0 : $wallet->balance;
+        return $wallet === null
+            ? Amount::format(0, Scales::forCurrency($this->walletCurrency()))
+            : $wallet->balance;
     }
 
     /**
      * Deposit into the default wallet (created on first use). For a named
      * wallet use $holder->wallet('name')->deposit(...).
      *
+     * @param  int|float|string  $amount  positive, in major units of the wallet's scale
      * @param  array<array-key, mixed>  $meta
      *
      * @see Wallet::deposit()
      */
     public function deposit(
-        int $amount,
+        int|float|string $amount,
         string|BackedEnum|WalletOperation|null $type = null,
         ?Model $reference = null,
         ?string $description = null,
@@ -120,12 +133,13 @@ trait HasWallet
      * Withdraw from the default wallet (created on first use). For a named
      * wallet use $holder->wallet('name')->withdraw(...).
      *
+     * @param  int|float|string  $amount  positive, in major units of the wallet's scale
      * @param  array<array-key, mixed>  $meta
      *
      * @see Wallet::withdraw()
      */
     public function withdraw(
-        int $amount,
+        int|float|string $amount,
         string|BackedEnum|WalletOperation|null $type = null,
         ?Model $reference = null,
         ?string $description = null,
@@ -141,6 +155,7 @@ trait HasWallet
      * wallet, or to the default wallet of another holder (created on first
      * use). For a named wallet use $holder->wallet('name')->transferTo(...).
      *
+     * @param  int|float|string  $amount  positive, in major units of the sending wallet's scale
      * @param  array<array-key, mixed>  $meta
      *
      * @throws InvalidTransfer when the recipient model does not hold wallets
@@ -149,7 +164,7 @@ trait HasWallet
      */
     public function transferTo(
         Model|Wallet $recipient,
-        int $amount,
+        int|float|string $amount,
         ?Model $reference = null,
         ?string $description = null,
         ?string $recipientDescription = null,
@@ -192,9 +207,10 @@ trait HasWallet
     }
 
     /**
-     * Minimum balance for wallets created without an explicit one.
+     * Minimum balance for wallets created without an explicit one, in major
+     * units (e.g. -100 for a credit line of 100.00).
      */
-    public function walletMinBalance(): int
+    public function walletMinBalance(): int|float|string
     {
         return 0;
     }
@@ -224,9 +240,12 @@ trait HasWallet
      * insert only rolls back the savepoint: on PostgreSQL the outer
      * transaction would otherwise be aborted and unusable.
      *
+     * The scale is fixed here, from the config for the currency, and set
+     * before min_balance so the latter is read with it.
+     *
      * @param  array<array-key, mixed>  $meta
      */
-    private function insertWallet(string $name, string $currency, int $minBalance, array $meta): Wallet
+    private function insertWallet(string $name, string $currency, int|float|string $minBalance, array $meta): Wallet
     {
         WalletAttributes::assertName($name);
         WalletAttributes::assertCurrency($currency);
@@ -243,6 +262,7 @@ trait HasWallet
             'holder_id' => $this->getKey(),
             'name' => $name,
             'currency' => $currency,
+            'scale' => Scales::forCurrency($currency),
             'min_balance' => $minBalance,
             'meta' => $meta === [] ? null : $meta,
         ]);

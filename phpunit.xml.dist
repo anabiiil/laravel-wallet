@@ -7,6 +7,10 @@
          failOnWarning="true"
          failOnRisky="true">
     <testsuites>
+        <!-- Pure unit tests: no application, no database. -->
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
         <testsuite name="Wallet Test Suite">
             <directory>tests/Feature</directory>
         </testsuite>

@@ -29,12 +29,12 @@ beforeEach(function (): void {
 });
 
 it('is dispatched after commit', function (): void {
-    expect(new TransactionRecorded($this->wallet->deposit(1)))->toBeInstanceOf(ShouldDispatchAfterCommit::class);
+    expect(new TransactionRecorded($this->wallet->deposit('0.01')))->toBeInstanceOf(ShouldDispatchAfterCommit::class);
 });
 
 it('is dispatched once per write with the entry', function (): void {
-    $deposit = $this->wallet->deposit(100);
-    $withdrawal = $this->wallet->withdraw(40);
+    $deposit = $this->wallet->deposit(1);
+    $withdrawal = $this->wallet->withdraw('0.40');
 
     expect($this->recorded->getArrayCopy())->toHaveCount(2)
         ->and($this->recorded[0]['id'])->toBe($deposit->id)
@@ -42,8 +42,8 @@ it('is dispatched once per write with the entry', function (): void {
 });
 
 it('is not dispatched when the write fails', function (): void {
-    expect(fn () => $this->wallet->withdraw(1))->toThrow(InsufficientFunds::class)
-        ->and(fn () => $this->wallet->deposit(1, 'reversal'))->toThrow(InvalidTransaction::class);
+    expect(fn () => $this->wallet->withdraw('0.01'))->toThrow(InsufficientFunds::class)
+        ->and(fn () => $this->wallet->deposit('0.01', 'reversal'))->toThrow(InvalidTransaction::class);
 
     expect($this->recorded->getArrayCopy())->toBe([]);
 });
@@ -54,8 +54,8 @@ it('waits for the outer transaction to commit', function (): void {
     $baseLevel = DB::transactionLevel();
 
     DB::transaction(function (): void {
-        $this->wallet->deposit(100);
-        $this->wallet->deposit(200);
+        $this->wallet->deposit(1);
+        $this->wallet->deposit(2);
 
         expect($this->recorded->getArrayCopy())->toBe([]);
     });
@@ -68,7 +68,7 @@ it('waits for the outer transaction to commit', function (): void {
 it('is never dispatched when the outer transaction rolls back', function (): void {
     try {
         DB::transaction(function (): void {
-            $this->wallet->deposit(100);
+            $this->wallet->deposit(1);
 
             throw new RuntimeException('boom');
         });

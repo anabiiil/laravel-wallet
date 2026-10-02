@@ -35,4 +35,20 @@ class InvalidWalletAttribute extends WalletException
             $holderType,
         ));
     }
+
+    public static function invalidScale(mixed $scale): self
+    {
+        return new self(sprintf(
+            'Invalid wallet scale [%s]: a wallet uses 2 or 3 decimal places. Leave it unset to take it from the [wallet.scale] / [wallet.currency_scales] config.',
+            is_scalar($scale) ? (string) $scale : get_debug_type($scale),
+        ));
+    }
+
+    public static function scaleNotLoaded(int|string|null $walletId): self
+    {
+        return new self(sprintf(
+            'Cannot read the amounts of wallet [%s]: its [scale] column was not selected, and amounts are formatted with it. Select it along with them, or read raw minor units with toBase().',
+            (string) $walletId,
+        ));
+    }
 }

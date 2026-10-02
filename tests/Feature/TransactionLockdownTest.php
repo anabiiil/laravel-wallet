@@ -36,8 +36,8 @@ it('reads its table name from config and uses the transaction builder', function
 });
 
 it('casts its attributes and has no updated_at', function (): void {
-    expect($this->transaction->amount)->toBe(100)
-        ->and($this->transaction->balance_after)->toBe(100)
+    expect($this->transaction->amount)->toBe('1.00')
+        ->and($this->transaction->balance_after)->toBe('1.00')
         ->and($this->transaction->meta)->toBe(['n' => 1])
         ->and($this->transaction->created_at)->toBeInstanceOf(DateTimeInterface::class)
         ->and($this->transaction->getUpdatedAtColumn())->toBeNull();

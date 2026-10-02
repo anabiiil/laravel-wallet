@@ -36,6 +36,7 @@ function walletAttributes(array $overrides = []): array
         'holder_id' => 1,
         'name' => 'default',
         'currency' => 'EGP',
+        'scale' => 2,
         'balance' => 0,
         'min_balance' => 0,
         'status' => 'active',
@@ -102,8 +103,8 @@ it('compares wallet names and idempotency keys exactly on every driver', functio
 
 it('has exactly the expected wallets columns', function (): void {
     $expected = [
-        'id', 'holder_type', 'holder_id', 'name', 'currency', 'balance',
-        'min_balance', 'status', 'meta', 'created_at', 'updated_at',
+        'id', 'holder_type', 'holder_id', 'name', 'currency', 'scale',
+        'balance', 'min_balance', 'status', 'meta', 'created_at', 'updated_at',
     ];
 
     expect(collect(Schema::getColumnListing(walletsTable()))->sort()->values()->all())

@@ -21,7 +21,7 @@ use Anabil\Wallet\Tests\Fixtures\User;
 
 beforeEach(function (): void {
     $this->wallet = User::create(['name' => 'Ada'])->wallet();
-    $this->wallet->deposit(1_000_00);
+    $this->wallet->deposit(1000);
 });
 
 it('defaults to no app enum', function (): void {
@@ -39,37 +39,37 @@ it('labels the core types', function (): void {
 });
 
 it('accepts core enum cases and their string values', function (): void {
-    expect($this->wallet->deposit(1, CoreType::Deposit)->type)->toBe(CoreType::Deposit)
-        ->and($this->wallet->withdraw(1, 'withdraw')->type)->toBe(CoreType::Withdraw);
+    expect($this->wallet->deposit('0.01', CoreType::Deposit)->type)->toBe(CoreType::Deposit)
+        ->and($this->wallet->withdraw('0.01', 'withdraw')->type)->toBe(CoreType::Withdraw);
 });
 
 it('accepts well-formed free strings when no enum is configured', function (string $type): void {
-    $tx = $this->wallet->deposit(1, $type);
+    $tx = $this->wallet->deposit('0.01', $type);
 
     expect($tx->type)->toBe($type)
         ->and($tx->getRawOriginal('type'))->toBe($type);
 })->with(['cashback', 'fee.card', 'promo:summer-2026', 'a', 'x'.str_repeat('y', 31)]);
 
 it('rejects badly formatted strings when no enum is configured', function (string $type): void {
-    expect(fn () => $this->wallet->deposit(1, $type))->toThrow(InvalidTransaction::class, 'Invalid transaction type');
+    expect(fn () => $this->wallet->deposit('0.01', $type))->toThrow(InvalidTransaction::class, 'Invalid transaction type');
 })->with(['', 'Cashback', '1st', 'has space', 'x'.str_repeat('y', 32), "cashback\n", 'émoji']);
 
 it('rejects enum cases that are neither core nor configured', function (): void {
-    expect(fn () => $this->wallet->deposit(1, AppType::Cashback))
+    expect(fn () => $this->wallet->deposit('0.01', AppType::Cashback))
         ->toThrow(InvalidTransaction::class, 'configure your enum')
-        ->and(fn () => $this->wallet->deposit(1, WalletStatus::Active))
+        ->and(fn () => $this->wallet->deposit('0.01', WalletStatus::Active))
         ->toThrow(InvalidTransaction::class, 'is not supported');
 });
 
 it('rejects the reserved core types for app calls', function (string|CoreType $type): void {
     $count = count($this->transactionRows());
 
-    expect(fn () => $this->wallet->deposit(1, $type))->toThrow(InvalidTransaction::class, 'reserved')
-        ->and(fn () => $this->wallet->withdraw(1, $type))->toThrow(InvalidTransaction::class, 'reserved');
+    expect(fn () => $this->wallet->deposit('0.01', $type))->toThrow(InvalidTransaction::class, 'reserved')
+        ->and(fn () => $this->wallet->withdraw('0.01', $type))->toThrow(InvalidTransaction::class, 'reserved');
 
     config(['wallet.types' => AppType::class]);
 
-    expect(fn () => $this->wallet->deposit(1, $type))->toThrow(InvalidTransaction::class, 'reserved');
+    expect(fn () => $this->wallet->deposit('0.01', $type))->toThrow(InvalidTransaction::class, 'reserved');
 
     expect($this->transactionRows())->toHaveCount($count);
 })->with([
@@ -88,8 +88,8 @@ describe('with an app enum configured', function (): void {
     });
 
     it('accepts its cases and values', function (): void {
-        $purchase = $this->wallet->withdraw(1, AppType::Purchase);
-        $bank = $this->wallet->withdraw(1, 'bank_withdrawal');
+        $purchase = $this->wallet->withdraw('0.01', AppType::Purchase);
+        $bank = $this->wallet->withdraw('0.01', 'bank_withdrawal');
 
         expect($purchase->type)->toBe(AppType::Purchase)
             ->and($purchase->getRawOriginal('type'))->toBe('purchase')
@@ -98,12 +98,12 @@ describe('with an app enum configured', function (): void {
     });
 
     it('still accepts the core types', function (): void {
-        expect($this->wallet->deposit(1)->type)->toBe(CoreType::Deposit)
-            ->and($this->wallet->deposit(1, 'deposit')->type)->toBe(CoreType::Deposit);
+        expect($this->wallet->deposit('0.01')->type)->toBe(CoreType::Deposit)
+            ->and($this->wallet->deposit('0.01', 'deposit')->type)->toBe(CoreType::Deposit);
     });
 
     it('rejects unknown strings', function (): void {
-        expect(fn () => $this->wallet->deposit(1, 'cashback_v2'))
+        expect(fn () => $this->wallet->deposit('0.01', 'cashback_v2'))
             ->toThrow(InvalidTransaction::class, 'Unknown transaction type [cashback_v2]');
     });
 
@@ -136,7 +136,7 @@ it('reads stored values as enums or raw strings', function (): void {
 it('rejects an invalid types config', function (mixed $config, string $message): void {
     config(['wallet.types' => $config]);
 
-    expect(fn () => $this->wallet->deposit(1))->toThrow(InvalidConfiguration::class, $message)
+    expect(fn () => $this->wallet->deposit('0.01'))->toThrow(InvalidConfiguration::class, $message)
         ->and(fn () => Types::resolveForRead('cashback'))->toThrow(InvalidConfiguration::class, $message);
 })->with([
     'not a class' => ['App\\Missing', 'string-backed enum'],
@@ -150,7 +150,7 @@ it('rejects an invalid types config', function (mixed $config, string $message):
 ]);
 
 it('keeps the ledger read-only despite the type accessor', function (): void {
-    $tx = $this->wallet->deposit(1, 'cashback');
+    $tx = $this->wallet->deposit('0.01', 'cashback');
 
     expect(fn () => $tx->save())->not->toThrow(Throwable::class)
         ->and(fn () => $tx->forceFill(['type' => 'other'])->save())->toThrow(ImmutableTransaction::class);

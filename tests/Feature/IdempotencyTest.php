@@ -37,8 +37,8 @@ beforeEach(function (): void {
 });
 
 it('replays a deposit made with the same key', function (): void {
-    $first = $this->wallet->deposit(100_00, idempotencyKey: 'order-1');
-    $again = $this->wallet->deposit(100_00, idempotencyKey: 'order-1');
+    $first = $this->wallet->deposit(100, idempotencyKey: 'order-1');
+    $again = $this->wallet->deposit(100, idempotencyKey: 'order-1');
 
     expect($first->wasRecentlyCreated)->toBeTrue()
         ->and($again)->toBeInstanceOf(WalletTransaction::class)
@@ -46,11 +46,11 @@ it('replays a deposit made with the same key', function (): void {
         ->and($again->id)->toBe($first->id)
         ->and($again->exists)->toBeTrue()
         ->and($again->wasRecentlyCreated)->toBeFalse()
-        ->and($again->amount)->toBe(100_00)
+        ->and($again->amount)->toBe('100.00')
         ->and($again->idempotency_key)->toBe('order-1')
         ->and($again->wallet)->toBe($this->wallet)
         ->and((int) $this->walletRow($this->wallet->id)['balance'])->toBe(100_00)
-        ->and($this->wallet->balance)->toBe(100_00)
+        ->and($this->wallet->balance)->toBe('100.00')
         ->and($this->transactionRows())->toHaveCount(1)
         ->and($this->recorded->getArrayCopy())->toBe([$first->id]);
 });
@@ -58,15 +58,15 @@ it('replays a deposit made with the same key', function (): void {
 it('returns the replayed entry with the given wallet and relations, without touching the instance', function (): void {
     $order = Order::create();
     $admin = Admin::create(['name' => 'Root']);
-    $first = $this->wallet->deposit(100, reference: $order, performedBy: $admin, idempotencyKey: 'k');
+    $first = $this->wallet->deposit(1, reference: $order, performedBy: $admin, idempotencyKey: 'k');
 
     $other = Wallet::findOrFail($this->wallet->id);
-    $this->wallet->deposit(50);
+    $this->wallet->deposit('0.50');
 
     $again = null;
 
     $queries = $this->queriesDuring(function () use ($other, $order, $admin, &$again): void {
-        $again = $other->deposit(100, reference: $order, performedBy: $admin, idempotencyKey: 'k');
+        $again = $other->deposit(1, reference: $order, performedBy: $admin, idempotencyKey: 'k');
     });
 
     expect($queries)->toHaveCount(1)
@@ -75,23 +75,24 @@ it('returns the replayed entry with the given wallet and relations, without touc
         ->and($again?->wallet)->toBe($other)
         ->and($again?->reference)->toBe($order)
         ->and($again?->performedBy)->toBe($admin)
+        ->and($again?->amount)->toBe('1.00')
         // The instance keeps its stale balance; refresh() brings it up to date.
-        ->and($other->balance)->toBe(100)
+        ->and($other->balance)->toBe('1.00')
         ->and($other->isDirty())->toBeFalse()
-        ->and($other->refresh()->balance)->toBe(150);
+        ->and($other->refresh()->balance)->toBe('1.50');
 });
 
 it('replays a withdrawal even when the wallet can no longer cover it', function (): void {
-    $this->wallet->deposit(100_00);
-    $first = $this->wallet->withdraw(100_00, idempotencyKey: 'payout-1');
+    $this->wallet->deposit(100);
+    $first = $this->wallet->withdraw(100, idempotencyKey: 'payout-1');
 
     expect((int) $this->walletRow($this->wallet->id)['balance'])->toBe(0);
 
-    $again = $this->wallet->withdraw(100_00, idempotencyKey: 'payout-1');
+    $again = $this->wallet->withdraw(100, idempotencyKey: 'payout-1');
 
-    $this->wallet->setMinBalance(50_00);
+    $this->wallet->setMinBalance(50);
 
-    $third = $this->wallet->withdraw(100_00, idempotencyKey: 'payout-1');
+    $third = $this->wallet->withdraw(100, idempotencyKey: 'payout-1');
 
     expect($again->id)->toBe($first->id)
         ->and($again->wasRecentlyCreated)->toBeFalse()
@@ -105,7 +106,7 @@ it('refuses to reuse a key for a different operation', function (string $change)
     $order = Order::create();
     $admin = Admin::create(['name' => 'Root']);
 
-    $this->wallet->deposit(10_00, 'topup', reference: $order, description: 'Top up', meta: ['a' => 1], performedBy: $admin, idempotencyKey: 'k');
+    $this->wallet->deposit(10, 'topup', reference: $order, description: 'Top up', meta: ['a' => 1], performedBy: $admin, idempotencyKey: 'k');
 
     // The holder (users.id 1) has the same key as the order (orders.id 1).
     expect($this->user->getKey())->toBe($order->getKey());
@@ -113,7 +114,7 @@ it('refuses to reuse a key for a different operation', function (string $change)
     $snapshot = $this->transactionRows();
 
     $args = [
-        'amount' => 10_00,
+        'amount' => 10,
         'type' => 'topup',
         'reference' => $order,
         'description' => 'Top up',
@@ -125,7 +126,7 @@ it('refuses to reuse a key for a different operation', function (string $change)
     $method = 'deposit';
 
     match ($change) {
-        'amount' => $args['amount'] = 10_01,
+        'amount' => $args['amount'] = '10.01',
         'direction' => $method = 'withdraw',
         'type' => $args['type'] = 'bonus',
         'reference model' => $args['reference'] = Order::create(),
@@ -152,7 +153,7 @@ it('refuses to reuse a key for a different operation', function (string $change)
 
     expect($this->transactionRows())->toBe($snapshot)
         ->and((int) $this->walletRow($this->wallet->id)['balance'])->toBe(10_00)
-        ->and($this->wallet->balance)->toBe(10_00)
+        ->and($this->wallet->balance)->toBe('10.00')
         ->and($this->recorded->getArrayCopy())->toHaveCount(1);
 })->with([
     'amount', 'direction', 'type', 'reference model', 'reference morph type', 'no reference',
@@ -160,12 +161,12 @@ it('refuses to reuse a key for a different operation', function (string $change)
 ]);
 
 it('ignores the key order of meta but not the order of lists', function (): void {
-    $this->wallet->deposit(100, meta: ['a' => 1, 'b' => ['y' => 1, 'x' => [2, 1]]], idempotencyKey: 'k');
+    $this->wallet->deposit(1, meta: ['a' => 1, 'b' => ['y' => 1, 'x' => [2, 1]]], idempotencyKey: 'k');
 
-    $again = $this->wallet->deposit(100, meta: ['b' => ['x' => [2, 1], 'y' => 1], 'a' => 1], idempotencyKey: 'k');
+    $again = $this->wallet->deposit(1, meta: ['b' => ['x' => [2, 1], 'y' => 1], 'a' => 1], idempotencyKey: 'k');
 
     expect($again->wasRecentlyCreated)->toBeFalse()
-        ->and(fn () => $this->wallet->deposit(100, meta: ['a' => 1, 'b' => ['y' => 1, 'x' => [1, 2]]], idempotencyKey: 'k'))
+        ->and(fn () => $this->wallet->deposit(1, meta: ['a' => 1, 'b' => ['y' => 1, 'x' => [1, 2]]], idempotencyKey: 'k'))
         ->toThrow(IdempotencyConflict::class)
         ->and($this->transactionRows())->toHaveCount(1);
 });
@@ -178,8 +179,8 @@ it('fingerprints an int and a numeric-string reference key the same', function (
     expect(Fingerprint::for(100, new Details('deposit', $order)))
         ->toBe(Fingerprint::for(100, new Details('deposit', $stringKeyed)));
 
-    $first = $this->wallet->deposit(100, reference: $order, idempotencyKey: 'k');
-    $again = $this->wallet->deposit(100, reference: $stringKeyed, idempotencyKey: 'k');
+    $first = $this->wallet->deposit(1, reference: $order, idempotencyKey: 'k');
+    $again = $this->wallet->deposit(1, reference: $stringKeyed, idempotencyKey: 'k');
 
     expect($again->id)->toBe($first->id)
         ->and($this->transactionRows())->toHaveCount(1);
@@ -188,10 +189,10 @@ it('fingerprints an int and a numeric-string reference key the same', function (
 it('treats a WalletOperation and the equivalent named arguments as the same operation', function (): void {
     $order = Order::create();
 
-    $first = $this->wallet->deposit(100, new OrderPayment($order, 'purchase'), idempotencyKey: 'k');
+    $first = $this->wallet->deposit(1, new OrderPayment($order, 'purchase'), idempotencyKey: 'k');
 
     $again = $this->wallet->deposit(
-        100,
+        1,
         'purchase',
         reference: $order,
         description: 'Payment for order #'.$order->id,
@@ -208,31 +209,31 @@ it('scopes keys to the wallet', function (): void {
     $savings = $this->user->wallet('savings');
     $other = Merchant::create(['name' => 'Shop'])->wallet();
 
-    $a = $this->wallet->deposit(100, idempotencyKey: 'shared');
-    $b = $savings->deposit(100, idempotencyKey: 'shared');
-    $c = $other->deposit(100, idempotencyKey: 'shared');
+    $a = $this->wallet->deposit(1, idempotencyKey: 'shared');
+    $b = $savings->deposit(1, idempotencyKey: 'shared');
+    $c = $other->deposit(1, idempotencyKey: 'shared');
 
     expect([$a->wasRecentlyCreated, $b->wasRecentlyCreated, $c->wasRecentlyCreated])->toBe([true, true, true])
         ->and(array_unique([$a->id, $b->id, $c->id]))->toHaveCount(3)
-        ->and($this->user->balance())->toBe(100)
-        ->and($this->user->balance('savings'))->toBe(100)
+        ->and($this->user->balance())->toBe('1.00')
+        ->and($this->user->balance('savings'))->toBe('1.00')
         ->and((int) $this->walletRow($other->id)['balance'])->toBe(100)
         ->and($this->transactionRows())->toHaveCount(3);
 });
 
 it('writes every time without a key', function (): void {
-    $this->wallet->deposit(100);
-    $this->wallet->deposit(100);
+    $this->wallet->deposit(1);
+    $this->wallet->deposit(1);
 
     expect($this->transactionRows())->toHaveCount(2)
         ->and(array_column($this->transactionRows(), 'idempotency_key'))->toBe([null, null])
         ->and(array_column($this->transactionRows(), 'idempotency_hash'))->toBe([null, null])
-        ->and($this->wallet->balance)->toBe(200);
+        ->and($this->wallet->balance)->toBe('2.00');
 });
 
 it('rejects invalid keys without writing', function (string $key): void {
-    expect(fn () => $this->wallet->deposit(100, idempotencyKey: $key))->toThrow(InvalidTransaction::class)
-        ->and(fn () => $this->wallet->withdraw(100, idempotencyKey: $key))->toThrow(InvalidTransaction::class)
+    expect(fn () => $this->wallet->deposit(1, idempotencyKey: $key))->toThrow(InvalidTransaction::class)
+        ->and(fn () => $this->wallet->withdraw(1, idempotencyKey: $key))->toThrow(InvalidTransaction::class)
         ->and($this->transactionRows())->toBe([]);
 })->with([
     'empty' => [''],
@@ -244,11 +245,11 @@ it('rejects invalid keys without writing', function (string $key): void {
 ]);
 
 it('accepts valid keys and stores them verbatim', function (string $key): void {
-    $tx = $this->wallet->deposit(100, idempotencyKey: $key);
+    $tx = $this->wallet->deposit(1, idempotencyKey: $key);
 
     expect($tx->idempotency_key)->toBe($key)
         ->and($this->transactionRows()[0]['idempotency_key'])->toBe($key)
-        ->and($this->wallet->deposit(100, idempotencyKey: $key)->id)->toBe($tx->id);
+        ->and($this->wallet->deposit(1, idempotencyKey: $key)->id)->toBe($tx->id);
 })->with([
     '128 characters' => [str_repeat('k', 128)],
     '128 multibyte characters' => [str_repeat('é', 128)],
@@ -257,37 +258,38 @@ it('accepts valid keys and stores them verbatim', function (string $key): void {
 ]);
 
 it('reports the key length in the error', function (): void {
-    expect(fn () => $this->wallet->deposit(100, idempotencyKey: str_repeat('é', 129)))
+    expect(fn () => $this->wallet->deposit(1, idempotencyKey: str_repeat('é', 129)))
         ->toThrow(InvalidTransaction::class, 'is 129 characters long: at most 128');
 });
 
 it('does not consume the key when the write fails', function (): void {
-    expect(fn () => $this->wallet->withdraw(50_00, idempotencyKey: 'payout'))->toThrow(InsufficientFunds::class)
+    expect(fn () => $this->wallet->withdraw(50, idempotencyKey: 'payout'))->toThrow(InsufficientFunds::class)
         ->and($this->transactionRows())->toBe([]);
 
-    $this->wallet->deposit(100_00);
+    $this->wallet->deposit(100);
 
-    $tx = $this->wallet->withdraw(50_00, idempotencyKey: 'payout');
+    $tx = $this->wallet->withdraw(50, idempotencyKey: 'payout');
 
     expect($tx->wasRecentlyCreated)->toBeTrue()
         ->and($tx->idempotency_key)->toBe('payout')
-        ->and($this->wallet->balance)->toBe(50_00)
-        ->and($this->wallet->withdraw(50_00, idempotencyKey: 'payout')->id)->toBe($tx->id)
-        ->and($this->wallet->balance)->toBe(50_00);
+        ->and($this->wallet->balance)->toBe('50.00')
+        ->and($this->wallet->withdraw(50, idempotencyKey: 'payout')->id)->toBe($tx->id)
+        ->and($this->wallet->balance)->toBe('50.00');
 });
 
 it('validates the request before looking the key up', function (): void {
-    $this->wallet->deposit(100, idempotencyKey: 'k');
+    $this->wallet->deposit(1, idempotencyKey: 'k');
 
-    expect(fn () => $this->wallet->deposit(100, 'reversal', idempotencyKey: 'k'))->toThrow(InvalidTransaction::class, 'reserved')
-        ->and(fn () => $this->wallet->deposit(100, description: str_repeat('x', 256), idempotencyKey: 'k'))->toThrow(InvalidTransaction::class)
-        ->and(fn () => $this->wallet->deposit(100, reference: new Order, idempotencyKey: 'k'))->toThrow(InvalidTransaction::class)
+    expect(fn () => $this->wallet->deposit(1, 'reversal', idempotencyKey: 'k'))->toThrow(InvalidTransaction::class, 'reserved')
+        ->and(fn () => $this->wallet->deposit(1, description: str_repeat('x', 256), idempotencyKey: 'k'))->toThrow(InvalidTransaction::class)
+        ->and(fn () => $this->wallet->deposit(1, reference: new Order, idempotencyKey: 'k'))->toThrow(InvalidTransaction::class)
         ->and(fn () => $this->wallet->deposit(0, idempotencyKey: 'k'))->toThrow(InvalidAmount::class)
+        ->and(fn () => $this->wallet->deposit('1.001', idempotencyKey: 'k'))->toThrow(InvalidAmount::class)
         ->and($this->transactionRows())->toHaveCount(1);
 });
 
 it('costs one extra lookup query with a key', function (): void {
-    $queries = $this->queriesDuring(fn () => $this->wallet->deposit(100, idempotencyKey: 'k'));
+    $queries = $this->queriesDuring(fn () => $this->wallet->deposit(1, idempotencyKey: 'k'));
 
     expect($queries)->toHaveCount(4)
         ->and($queries[0])->toStartWith('select')
@@ -304,29 +306,29 @@ it('returns the winner of a race with a matching request', function (): void {
         $winner = $this->competingEntry($this->wallet, 30_00, new Details('deposit'), 'race');
     });
 
-    $tx = $this->wallet->deposit(30_00, idempotencyKey: 'race');
+    $tx = $this->wallet->deposit(30, idempotencyKey: 'race');
 
     expect($winner)->not->toBeNull()
         ->and($tx->id)->toBe($winner)
         ->and($tx->wasRecentlyCreated)->toBeFalse()
-        ->and($tx->amount)->toBe(30_00)
+        ->and($tx->amount)->toBe('30.00')
         ->and($tx->wallet)->toBe($this->wallet)
         ->and((int) $this->walletRow($this->wallet->id)['balance'])->toBe(30_00)
         ->and($this->ledgerSum($this->wallet->id))->toBe(30_00)
         ->and(DB::table($this->transactionsTable())->where('idempotency_key', 'race')->count())->toBe(1)
-        ->and($this->wallet->balance)->toBe(0)
+        ->and($this->wallet->balance)->toBe('0.00')
         ->and($this->recorded->getArrayCopy())->toBe([]);
 });
 
 it('throws a conflict and rolls back when the race winner did something else', function (): void {
-    $this->wallet->deposit(10_00);
+    $this->wallet->deposit(10);
 
     $this->afterIdempotencyLookup(function (): void {
         $this->competingEntry($this->wallet, 99, new Details('deposit'), 'race');
     });
 
     try {
-        $this->wallet->deposit(30_00, idempotencyKey: 'race');
+        $this->wallet->deposit(30, idempotencyKey: 'race');
         $this->fail('Expected IdempotencyConflict.');
     } catch (IdempotencyConflict $e) {
         expect($e->key)->toBe('race')
@@ -336,7 +338,7 @@ it('throws a conflict and rolls back when the race winner did something else', f
     expect((int) $this->walletRow($this->wallet->id)['balance'])->toBe(10_99)
         ->and($this->ledgerSum($this->wallet->id))->toBe(10_99)
         ->and($this->transactionRows())->toHaveCount(2)
-        ->and($this->wallet->balance)->toBe(10_00)
+        ->and($this->wallet->balance)->toBe('10.00')
         ->and($this->recorded->getArrayCopy())->toHaveCount(1);
 });
 
@@ -348,15 +350,15 @@ it('recovers from a race inside an outer transaction and keeps it usable', funct
     });
 
     [$replayed, $next] = DB::transaction(fn (): array => [
-        $this->wallet->deposit(5_00, idempotencyKey: 'race'),
-        $this->wallet->deposit(2_00),
+        $this->wallet->deposit(5, idempotencyKey: 'race'),
+        $this->wallet->deposit(2),
     ]);
 
     expect($replayed->id)->toBe($winner)
         ->and($replayed->wasRecentlyCreated)->toBeFalse()
         ->and($next->wasRecentlyCreated)->toBeTrue()
-        ->and($next->balance_after)->toBe(7_00)
-        ->and($this->wallet->balance)->toBe(7_00)
+        ->and($next->balance_after)->toBe('7.00')
+        ->and($this->wallet->balance)->toBe('7.00')
         ->and((int) $this->walletRow($this->wallet->id)['balance'])->toBe(7_00)
         ->and($this->ledgerSum($this->wallet->id))->toBe(7_00)
         ->and($this->transactionRows())->toHaveCount(2)
@@ -376,24 +378,24 @@ it('rethrows the unique violation when no entry is found for the key afterwards'
         DB::table($this->transactionsTable())->where('id', $winner)->delete();
     });
 
-    expect(fn () => $this->wallet->deposit(5, idempotencyKey: 'race'))->toThrow(UniqueConstraintViolationException::class)
+    expect(fn () => $this->wallet->deposit('0.05', idempotencyKey: 'race'))->toThrow(UniqueConstraintViolationException::class)
         ->and($this->transactionRows())->toBe([])
         ->and((int) $this->walletRow($this->wallet->id)['balance'])->toBe(1)
-        ->and($this->wallet->balance)->toBe(0)
+        ->and($this->wallet->balance)->toBe('0.00')
         ->and($this->recorded->getArrayCopy())->toBe([]);
 });
 
 it('never lets NULL keys collide', function (): void {
     $this->insertTransactionRow($this->wallet->id, ['idempotency_key' => null]);
 
-    expect($this->wallet->deposit(100)->wasRecentlyCreated)->toBeTrue()
+    expect($this->wallet->deposit(1)->wasRecentlyCreated)->toBeTrue()
         ->and($this->transactionRows())->toHaveCount(2);
 });
 
 it('stores a stable, lowercase hex fingerprint', function (): void {
     $order = Order::create();
 
-    $tx = $this->wallet->deposit(15_00, 'topup', reference: $order, description: 'Café', meta: ['b' => 1.0, 'a' => [3, 1]], idempotencyKey: 'k');
+    $tx = $this->wallet->deposit(15, 'topup', reference: $order, description: 'Café', meta: ['b' => 1.0, 'a' => [3, 1]], idempotencyKey: 'k');
 
     $hash = $this->transactionRows()[0]['idempotency_hash'];
 
@@ -418,14 +420,14 @@ it('keeps the fingerprint payload stable', function (): void {
 });
 
 it('accepts the key through the holder', function (): void {
-    $deposit = $this->user->deposit(100_00, idempotencyKey: 'in');
-    $withdrawal = $this->user->withdraw(40_00, idempotencyKey: 'out');
+    $deposit = $this->user->deposit(100, idempotencyKey: 'in');
+    $withdrawal = $this->user->withdraw(40, idempotencyKey: 'out');
 
-    expect($this->user->deposit(100_00, idempotencyKey: 'in')->id)->toBe($deposit->id)
-        ->and($this->user->withdraw(40_00, idempotencyKey: 'out')->id)->toBe($withdrawal->id)
+    expect($this->user->deposit('100.00', idempotencyKey: 'in')->id)->toBe($deposit->id)
+        ->and($this->user->withdraw(40.0, idempotencyKey: 'out')->id)->toBe($withdrawal->id)
         ->and($deposit->idempotency_key)->toBe('in')
         ->and($withdrawal->idempotency_key)->toBe('out')
-        ->and($this->user->balance())->toBe(60_00)
+        ->and($this->user->balance())->toBe('60.00')
         ->and($this->transactionRows())->toHaveCount(2)
-        ->and(fn () => $this->user->withdraw(40_01, idempotencyKey: 'out'))->toThrow(IdempotencyConflict::class);
+        ->and(fn () => $this->user->withdraw('40.01', idempotencyKey: 'out'))->toThrow(IdempotencyConflict::class);
 });

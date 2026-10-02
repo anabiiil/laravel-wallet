@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Anabil\Wallet\Exceptions\InsufficientFunds;
 use Anabil\Wallet\Models\Wallet;
+use Anabil\Wallet\Support\Amount;
 use Anabil\Wallet\Tests\Fixtures\User;
 use Illuminate\Support\Facades\DB;
 
@@ -11,16 +12,17 @@ use Illuminate\Support\Facades\DB;
  * Real concurrency: every worker runs in its own forked process with its
  * own database connection, and all of them start at the same moment. See
  * ConcurrencyTestCase for the fork and database setup. The workers reload
- * their wallet by id, as a separate request would.
+ * their wallet by id, as a separate request would. Amounts are passed in
+ * major units; balances are checked as stored, in minor units.
  */
 
 it('lets exactly as many concurrent withdrawals through as the balance covers', function (): void {
     $wallet = User::create(['name' => 'Ada'])->wallet();
-    $wallet->deposit(100_00);
+    $wallet->deposit(100);
 
     $outcomes = $this->inParallel(array_fill(0, 10, function () use ($wallet): string {
         try {
-            Wallet::query()->findOrFail($wallet->id)->withdraw(30_00);
+            Wallet::query()->findOrFail($wallet->id)->withdraw('30.00');
 
             return 'withdrawn';
         } catch (InsufficientFunds) {
@@ -42,8 +44,8 @@ it('lets exactly as many concurrent withdrawals through as the balance covers', 
 it('runs opposite transfers concurrently without deadlocks and conserves money', function (): void {
     $a = User::create(['name' => 'A'])->wallet();
     $b = User::create(['name' => 'B'])->wallet();
-    $a->deposit(1_000_00);
-    $b->deposit(1_000_00);
+    $a->deposit(1000);
+    $b->deposit(1000);
 
     $transfersPerWorker = 15;
 
@@ -57,8 +59,9 @@ it('runs opposite transfers concurrently without deadlocks and conserves money',
             $moved = 0;
 
             for ($n = 1; $n <= $transfersPerWorker; $n++) {
+                // In minor units, sent as a decimal string ("1.11", "1.12"...).
                 $amount = 1_00 + $index * 10 + $n;
-                $sender->transferTo($recipient, $amount, description: "worker {$index} #{$n}");
+                $sender->transferTo($recipient, Amount::format($amount, 2), description: "worker {$index} #{$n}");
                 $moved += $amount;
             }
 
@@ -83,9 +86,9 @@ it('runs opposite transfers concurrently without deadlocks and conserves money',
 
 it('records a concurrently repeated keyed deposit exactly once', function (): void {
     $wallet = User::create(['name' => 'Ada'])->wallet();
-    $wallet->deposit(7);
+    $wallet->deposit('0.07');
 
-    $ids = $this->inParallel(array_fill(0, 8, fn (): int => Wallet::query()->findOrFail($wallet->id)->deposit(50_00, idempotencyKey: 'same')->id));
+    $ids = $this->inParallel(array_fill(0, 8, fn (): int => Wallet::query()->findOrFail($wallet->id)->deposit(50, idempotencyKey: 'same')->id));
 
     $rows = DB::table((string) config('wallet.tables.transactions'))->where('idempotency_key', 'same')->get();
 
@@ -100,11 +103,11 @@ it('records a concurrently repeated keyed deposit exactly once', function (): vo
 it('records a concurrently repeated keyed transfer exactly once', function (): void {
     $sender = User::create(['name' => 'Sender'])->wallet();
     $recipient = User::create(['name' => 'Recipient'])->wallet();
-    $sender->deposit(100_00);
+    $sender->deposit(100);
 
     $results = $this->inParallel(array_fill(0, 8, function () use ($sender, $recipient): array {
         $result = Wallet::query()->findOrFail($sender->id)
-            ->transferTo(Wallet::query()->findOrFail($recipient->id), 10_00, description: 'Once', idempotencyKey: 'same-transfer');
+            ->transferTo(Wallet::query()->findOrFail($recipient->id), 10.0, description: 'Once', idempotencyKey: 'same-transfer');
 
         return [$result->out->id, $result->in->id, $result->group, $result->replayed()];
     }));

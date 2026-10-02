@@ -10,6 +10,7 @@ use Anabil\Wallet\Tests\Fixtures\Merchant;
 use Anabil\Wallet\Tests\Fixtures\User;
 use Illuminate\Database\Eloquent\MassAssignmentException;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /*
@@ -62,6 +63,7 @@ it('refuses to change protected attributes on the model', function (string $colu
     'name' => ['name', 'renamed'],
     'currency' => ['currency', 'USD'],
     'id' => ['id', 999],
+    'scale' => ['scale', 3],
 ])->with([
     'save' => fn (Wallet $w) => $w->save(),
     'saveQuietly' => fn (Wallet $w) => $w->saveQuietly(),
@@ -93,8 +95,24 @@ it('refuses a balance change even when an updating listener sneaks it in', funct
         $wallet->balance = 999;
     });
 
-    $this->wallet->update(['meta' => ['x' => 1]]);
+    try {
+        $this->wallet->update(['meta' => ['x' => 1]]);
+    } finally {
+        expect($this->walletRow($this->walletId))->toBe($this->snapshot);
+    }
 })->throws(ImmutableWallet::class);
+
+it('refuses a scale change even when an updating listener sneaks it in', function (): void {
+    Wallet::updating(function (Wallet $wallet): void {
+        $wallet->forceFill(['scale' => 3]);
+    });
+
+    try {
+        $this->wallet->setMinBalance(-10);
+    } finally {
+        expect($this->walletRow($this->walletId))->toBe($this->snapshot);
+    }
+})->throws(ImmutableWallet::class, '[scale]');
 
 it('refuses a starting balance even when a creating listener sneaks it in', function (): void {
     Wallet::creating(function (Wallet $wallet): void {
@@ -156,7 +174,7 @@ it('ignores a balance passed as pending relation attributes', function (): void 
         ->withAttributes(['name' => 'rich', 'currency' => 'EGP', 'balance' => 5])
         ->create();
 
-    expect($wallet->balance)->toBe(0)
+    expect($wallet->balance)->toBe('0.00')
         ->and((int) $this->walletRow($wallet->id)['balance'])->toBe(0);
 });
 
@@ -181,6 +199,9 @@ it('refuses query-level writes to protected columns', function (Closure $write):
     'update holder_type' => fn () => Wallet::query()->update(['holder_type' => 'merchant']),
     'update name' => fn () => Wallet::query()->update(['name' => 'x']),
     'update currency' => fn () => Wallet::query()->update(['currency' => 'USD']),
+    'update scale' => fn () => Wallet::query()->update(['scale' => 3]),
+    'update qualified scale' => fn () => Wallet::query()->update(['wallets.scale' => 3]),
+    'increment scale' => fn () => Wallet::query()->increment('scale'),
     'update mixed with meta' => fn () => Wallet::query()->update(['meta' => '{}', 'balance' => 1]),
     'static update' => fn () => Wallet::where('id', '>', 0)->update(['balance' => 999]),
     'relation update' => fn () => test()->holder->wallets()->update(['balance' => 999]),
@@ -195,6 +216,67 @@ it('refuses query-level writes to protected columns', function (Closure $write):
     'touch balance' => fn () => Wallet::query()->touch('balance'),
     'updateFrom' => fn () => Wallet::query()->updateFrom(['balance' => 999]),
 ]);
+
+it('refuses query-level writes to min_balance, which would be raw minor units', function (Closure $write): void {
+    expect(fn () => $write())->toThrow(ImmutableWallet::class, 'setMinBalance()');
+
+    expect($this->walletRow($this->walletId))->toBe($this->snapshot);
+})->with([
+    'update' => fn () => Wallet::query()->whereKey(test()->walletId)->update(['min_balance' => -10]),
+    'update qualified' => fn () => Wallet::query()->update(['wallets.min_balance' => -10]),
+    'update mixed with meta' => fn () => Wallet::query()->update(['meta' => '{}', 'min_balance' => -10]),
+    'relation update' => fn () => test()->holder->wallets()->update(['min_balance' => -10]),
+    'updateFrom' => fn () => Wallet::query()->updateFrom(['min_balance' => -10]),
+    'increment' => fn () => Wallet::query()->increment('min_balance', 3),
+    'decrement' => fn () => Wallet::query()->decrement('min_balance', 3),
+    'increment extra' => fn () => Wallet::query()->increment('status', 0, ['min_balance' => -10]),
+    'incrementEach' => fn () => Wallet::query()->incrementEach(['min_balance' => 3]),
+    'decrementEach' => fn () => Wallet::query()->decrementEach(['min_balance' => 3]),
+    'touch' => fn () => Wallet::query()->touch('min_balance'),
+]);
+
+it('still changes min_balance through the model, in major units', function (): void {
+    $this->wallet->setMinBalance(-10);
+
+    expect((int) $this->walletRow($this->walletId)['min_balance'])->toBe(-10_00);
+
+    $this->wallet->min_balance = -20;
+    $this->wallet->save();
+
+    expect((int) $this->walletRow($this->walletId)['min_balance'])->toBe(-20_00)
+        ->and($this->wallet->min_balance)->toBe('-20.00')
+        ->and($this->wallet->isDirty())->toBeFalse()
+        ->and(Wallet::findOrFail($this->walletId)->min_balance)->toBe('-20.00');
+});
+
+it('keeps the model update path identical otherwise', function (): void {
+    Carbon::setTestNow('2026-07-08 09:10:11');
+
+    try {
+        $updated = [];
+        Wallet::updated(function (Wallet $wallet) use (&$updated): void {
+            $updated[] = $wallet->getChanges();
+        });
+
+        $this->wallet->update(['meta' => ['a' => 1]]);
+        $clean = $this->wallet->save();
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    expect($clean)->toBeTrue()
+        ->and($updated)->toHaveCount(1)
+        ->and(array_keys($updated[0]))->toEqualCanonicalizing(['meta', 'updated_at'])
+        ->and((string) $this->walletRow($this->walletId)['updated_at'])->toStartWith('2026-07-08 09:10:11')
+        ->and(json_decode((string) $this->walletRow($this->walletId)['meta'], true))->toBe(['a' => 1]);
+});
+
+it('stops the update when an updating listener returns false', function (): void {
+    Wallet::updating(fn (): bool => false);
+
+    expect($this->wallet->update(['meta' => ['a' => 1]]))->toBeFalse()
+        ->and($this->walletRow($this->walletId))->toBe($this->snapshot);
+});
 
 it('refuses bulk inserts and upserts', function (Closure $write): void {
     expect(fn () => $write())->toThrow(ImmutableWallet::class);
@@ -253,14 +335,13 @@ it('refuses to delete wallets', function (Closure $delete): void {
 
 it('still allows query-level updates of harmless columns', function (): void {
     Wallet::query()->whereKey($this->wallet->id)->update(['meta' => json_encode(['a' => 1])]);
-    Wallet::query()->whereKey($this->wallet->id)->update(['wallets.min_balance' => -10]);
-    Wallet::query()->whereKey($this->wallet->id)->update(['status' => WalletStatus::Frozen->value]);
-    Wallet::query()->whereKey($this->wallet->id)->increment('min_balance', 3);
+    Wallet::query()->whereKey($this->wallet->id)->update(['wallets.status' => WalletStatus::Frozen->value]);
+    $this->holder->wallets()->update(['meta->b' => 2]);
 
     $row = $this->walletRow($this->walletId);
 
-    expect(json_decode((string) $row['meta'], true))->toBe(['a' => 1])
-        ->and((int) $row['min_balance'])->toBe(-7)
+    expect(json_decode((string) $row['meta'], true))->toBe(['a' => 1, 'b' => 2])
+        ->and((int) $row['min_balance'])->toBe(0)
         ->and($row['status'])->toBe('frozen')
         ->and((int) $row['balance'])->toBe(0);
 });
@@ -274,7 +355,10 @@ it('still allows json path updates on meta', function (): void {
 });
 
 it('still allows reads', function (): void {
-    expect(Wallet::query()->whereKey($this->wallet->id)->value('balance'))->toBe(0)
+    // value() hydrates a model with only the selected column; amounts need
+    // the scale too (see DecimalAmountsTest), so read it alongside them.
+    expect(Wallet::query()->whereKey($this->wallet->id)->first(['balance', 'scale'])?->balance)->toBe('0.00')
+        ->and(Wallet::query()->whereKey($this->wallet->id)->toBase()->value('balance'))->toBe(0)
         ->and(Wallet::query()->count())->toBe($this->walletCount)
         ->and(Wallet::query()->sum('balance'))->toEqual(0)
         ->and(Wallet::query()->where('holder_type', 'user')->exists())->toBeTrue();

@@ -28,11 +28,11 @@ beforeEach(function (): void {
     $this->other = User::create(['name' => 'Bob'])->wallet();
 
     $this->ids = [
-        'deposit' => $this->wallet->deposit(100_00, performedBy: $this->admin)->id,
-        'purchase' => $this->wallet->withdraw(10_00, new OrderPayment($this->order))->id,
-        'cashback' => $this->wallet->deposit(1_00, AppType::Cashback, reference: $this->order)->id,
-        'bank' => $this->wallet->withdraw(20_00, 'bank_withdrawal', performedBy: $this->otherAdmin)->id,
-        'other' => $this->other->deposit(5_00, reference: $this->otherOrder, performedBy: $this->admin)->id,
+        'deposit' => $this->wallet->deposit(100, performedBy: $this->admin)->id,
+        'purchase' => $this->wallet->withdraw(10, new OrderPayment($this->order))->id,
+        'cashback' => $this->wallet->deposit(1, AppType::Cashback, reference: $this->order)->id,
+        'bank' => $this->wallet->withdraw(20, 'bank_withdrawal', performedBy: $this->otherAdmin)->id,
+        'other' => $this->other->deposit(5, reference: $this->otherOrder, performedBy: $this->admin)->id,
     ];
 });
 
@@ -91,7 +91,7 @@ it('does not confuse morph types that share an id', function (): void {
     $order = (new Order)->forceFill(['id' => $id]);
     $order->save();
 
-    $tx = $this->wallet->deposit(1, reference: $order, performedBy: $admin);
+    $tx = $this->wallet->deposit('0.01', reference: $order, performedBy: $admin);
 
     expect(WalletTransaction::query()->whereReference($order)->pluck('id')->all())->toBe([$tx->id])
         ->and(WalletTransaction::query()->whereReference($admin)->count())->toBe(0)

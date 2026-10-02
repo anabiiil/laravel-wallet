@@ -12,9 +12,12 @@ use Illuminate\Support\Str;
 
 /**
  * Query builder for wallets. Reads are untouched and harmless columns (meta,
- * status, min_balance, timestamps) can still be updated in bulk, but any
- * query-level write to a protected column, any bulk insert/upsert and any
- * delete is refused.
+ * status, timestamps) can still be updated in bulk, but any query-level
+ * write to a protected column or to min_balance, any bulk insert/upsert and
+ * any delete is refused. min_balance is refused because a query writes raw
+ * minor units while the rest of the API speaks major units: change it with
+ * $wallet->setMinBalance(). The model's own save() writes through the base
+ * query builder (see Wallet::performUpdate()), so it is not affected.
  *
  * The insert* methods below would otherwise be forwarded by Eloquent's
  * __call() "passthru" straight to the base query builder, bypassing the
@@ -217,6 +220,10 @@ class WalletBuilder extends Builder
 
             if (in_array($name, $protected, true)) {
                 throw ImmutableWallet::protectedColumn($name, $operation);
+            }
+
+            if ($name === 'min_balance') {
+                throw ImmutableWallet::minBalanceThroughQuery($operation);
             }
         }
     }

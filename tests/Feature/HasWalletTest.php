@@ -22,8 +22,9 @@ it('creates the default wallet on first use with the holder alias and defaults',
         ->and($wallet->holder_id)->toBe($user->getKey())
         ->and($wallet->name)->toBe('default')
         ->and($wallet->currency)->toBe('EGP')
-        ->and($wallet->min_balance)->toBe(0)
-        ->and($wallet->balance)->toBe(0)
+        ->and($wallet->scale)->toBe(2)
+        ->and($wallet->min_balance)->toBe('0.00')
+        ->and($wallet->balance)->toBe('0.00')
         ->and($wallet->status)->toBe(WalletStatus::Active);
 
     $row = $this->walletRow($wallet->id);
@@ -32,6 +33,7 @@ it('creates the default wallet on first use with the holder alias and defaults',
         ->and((int) $row['holder_id'])->toBe($user->getKey())
         ->and($row['name'])->toBe('default')
         ->and($row['currency'])->toBe('EGP')
+        ->and((int) $row['scale'])->toBe(2)
         ->and((int) $row['balance'])->toBe(0)
         ->and((int) $row['min_balance'])->toBe(0)
         ->and($row['status'])->toBe('active');
@@ -80,10 +82,10 @@ it('uses per-holder defaults for currency and minimum balance', function (): voi
     $merchantWallet = Merchant::create(['name' => 'Shop'])->wallet();
     $adminWallet = Admin::create(['name' => 'Root'])->wallet();
 
-    expect($merchantWallet->min_balance)->toBe(-100_00)
+    expect($merchantWallet->min_balance)->toBe('-100.00')
         ->and($merchantWallet->currency)->toBe('EGP')
         ->and($adminWallet->currency)->toBe('USD')
-        ->and($adminWallet->min_balance)->toBe(0)
+        ->and($adminWallet->min_balance)->toBe('0.00')
         ->and((int) $this->walletRow($merchantWallet->id)['min_balance'])->toBe(-100_00)
         ->and($this->walletRow($adminWallet->id)['currency'])->toBe('USD');
 });
@@ -117,7 +119,8 @@ it('works with strict models', function (): void {
 
         expect($again->id)->toBe($wallet->id)
             ->and($named->meta)->toBe(['label' => 'Rainy day'])
-            ->and($user->balance())->toBe(0);
+            ->and($named->min_balance)->toBe('-5.00')
+            ->and($user->balance())->toBe('0.00');
     });
 });
 
@@ -131,6 +134,7 @@ it('returns the existing row when the wallet already exists but was not seen yet
         'holder_id' => $user->getKey(),
         'name' => 'default',
         'currency' => 'EGP',
+        'scale' => 2,
         'balance' => 0,
         'min_balance' => 0,
         'status' => 'active',
@@ -155,6 +159,7 @@ it('recovers from a unique violation when the lookup missed a concurrent insert'
                 'holder_id' => $user->getKey(),
                 'name' => 'default',
                 'currency' => 'EGP',
+                'scale' => 2,
                 'balance' => 0,
                 'min_balance' => 0,
                 'status' => 'active',
@@ -172,13 +177,15 @@ it('recovers from a unique violation when the lookup missed a concurrent insert'
 it('creates a wallet explicitly with the given attributes', function (): void {
     $user = User::create(['name' => 'Ada']);
 
-    $wallet = $user->createWallet('savings', 'USD', -50_00, ['label' => 'Rainy day']);
+    $wallet = $user->createWallet('savings', 'USD', -50, ['label' => 'Rainy day']);
 
     expect($wallet->name)->toBe('savings')
         ->and($wallet->currency)->toBe('USD')
-        ->and($wallet->min_balance)->toBe(-50_00)
+        ->and($wallet->min_balance)->toBe('-50.00')
+        ->and($wallet->minBalanceInMinor())->toBe(-50_00)
+        ->and((int) $this->walletRow($wallet->id)['min_balance'])->toBe(-50_00)
         ->and($wallet->meta)->toBe(['label' => 'Rainy day'])
-        ->and($wallet->balance)->toBe(0)
+        ->and($wallet->balance)->toBe('0.00')
         ->and($user->wallet('savings')->id)->toBe($wallet->id);
 });
 
@@ -186,7 +193,7 @@ it('uses the holder defaults for createWallet when currency and minimum are omit
     $wallet = Merchant::create(['name' => 'Shop'])->createWallet('payouts');
 
     expect($wallet->currency)->toBe('EGP')
-        ->and($wallet->min_balance)->toBe(-100_00);
+        ->and($wallet->min_balance)->toBe('-100.00');
 });
 
 it('refuses to create a wallet that already exists', function (): void {
@@ -266,8 +273,8 @@ it('reports whether a wallet exists without creating it', function (): void {
 it('returns zero balance for a missing wallet without creating it', function (): void {
     $user = User::create(['name' => 'Ada']);
 
-    expect($user->balance())->toBe(0)
-        ->and($user->balance('savings'))->toBe(0)
+    expect($user->balance())->toBe('0.00')
+        ->and($user->balance('savings'))->toBe('0.00')
         ->and(DB::table($this->walletsTable())->count())->toBe(0);
 });
 
@@ -279,10 +286,11 @@ it('reads the balance of an existing wallet', function (): void {
         'holder_id' => $user->getKey(),
         'name' => 'default',
         'currency' => 'EGP',
+        'scale' => 2,
         'balance' => 12_34,
         'min_balance' => 0,
         'status' => 'active',
     ]);
 
-    expect($user->balance())->toBe(12_34);
+    expect($user->balance())->toBe('12.34');
 });

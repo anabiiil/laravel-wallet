@@ -20,6 +20,9 @@ return new class extends Migration
 
             ExactMatch::apply($table->string('name', 64), $this->getConnection());
             $table->char('currency', 3);
+            // Decimal places (2 or 3), fixed at creation: balances are stored
+            // in minor units, so this is what gives them their meaning.
+            $table->unsignedTinyInteger('scale');
             $table->bigInteger('balance')->default(0);
             $table->bigInteger('min_balance')->default(0);
             $table->string('status', 16)->default('active');

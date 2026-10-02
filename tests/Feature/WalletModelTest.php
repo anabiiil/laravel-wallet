@@ -33,8 +33,11 @@ it('casts its attributes', function (): void {
 
     $fresh = Wallet::findOrFail($wallet->id);
 
-    expect($fresh->balance)->toBeInt()
-        ->and($fresh->min_balance)->toBeInt()
+    expect($fresh->balance)->toBe('0.00')
+        ->and($fresh->min_balance)->toBe('0.00')
+        ->and($fresh->scale)->toBe(2)
+        ->and($fresh->balanceInMinor())->toBe(0)
+        ->and($fresh->minBalanceInMinor())->toBe(0)
         ->and($fresh->status)->toBe(WalletStatus::Active)
         ->and($fresh->meta)->toBe(['a' => 1]);
 });
@@ -50,8 +53,9 @@ it('updates meta through update()', function (): void {
 it('changes the minimum balance through setMinBalance()', function (): void {
     $wallet = User::create(['name' => 'Ada'])->wallet();
 
-    expect($wallet->setMinBalance(-25_00))->toBe($wallet)
-        ->and($wallet->min_balance)->toBe(-25_00)
+    expect($wallet->setMinBalance(-25))->toBe($wallet)
+        ->and($wallet->min_balance)->toBe('-25.00')
+        ->and($wallet->isDirty())->toBeFalse()
         ->and((int) $this->walletRow($wallet->id)['min_balance'])->toBe(-25_00);
 });
 

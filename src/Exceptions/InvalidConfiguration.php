@@ -44,4 +44,25 @@ class InvalidConfiguration extends WalletException
             $pattern,
         ));
     }
+
+    /**
+     * @param  list<int>  $allowed
+     */
+    public static function invalidScale(string $key, mixed $value, array $allowed): self
+    {
+        return new self(sprintf(
+            'The [%s] config must be one of %s (the number of decimal places of an amount), got [%s].',
+            $key,
+            implode(', ', $allowed),
+            is_scalar($value) ? var_export($value, true) : get_debug_type($value),
+        ));
+    }
+
+    public static function currencyScalesNotArray(mixed $value): self
+    {
+        return new self(sprintf(
+            'The [wallet.currency_scales] config must be an array of currency codes to scales, e.g. [\'KWD\' => 3], got [%s].',
+            get_debug_type($value),
+        ));
+    }
 }
