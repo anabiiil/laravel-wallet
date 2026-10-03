@@ -70,6 +70,32 @@ class WalletTransactionBuilder extends Builder
     }
 
     /**
+     * Reversal entries (type reversal).
+     */
+    public function reversals(): static
+    {
+        return $this->ofType(CoreType::Reversal);
+    }
+
+    /**
+     * Entries that have been reversed.
+     */
+    public function whereReversed(): static
+    {
+        return $this->whereHas('reversal');
+    }
+
+    /**
+     * Entries that have not been reversed (reversal entries included: they
+     * are never reversed themselves; combine with ofType() to leave them
+     * out).
+     */
+    public function whereNotReversed(): static
+    {
+        return $this->whereDoesntHave('reversal');
+    }
+
+    /**
      * Entries whose reference is the given model.
      */
     public function whereReference(Model $model): static

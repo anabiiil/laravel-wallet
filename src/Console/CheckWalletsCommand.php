@@ -89,7 +89,7 @@ class CheckWalletsCommand extends Command
         }
 
         $this->components->info(sprintf(
-            'Checked %d wallet(s) and %d transfer group(s): %d error(s), %d warning(s).',
+            'Checked %d wallet(s) and %d group(s): %d error(s), %d warning(s).',
             $report->walletsChecked,
             $report->groupsChecked,
             count($report->errors()),

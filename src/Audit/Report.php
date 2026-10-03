@@ -6,7 +6,8 @@ namespace Anabil\Wallet\Audit;
 
 /**
  * The result of one WalletAuditor::audit() run: how many wallets and
- * transfer groups were looked at, and every Issue found along the way.
+ * groups (transfers and reversals of transfers) were looked at, and every
+ * Issue found along the way.
  */
 final readonly class Report
 {

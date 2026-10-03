@@ -9,6 +9,7 @@ use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Ledger\Details;
 use Anabil\Wallet\Ledger\Fingerprint;
 use Anabil\Wallet\Models\Wallet;
+use Anabil\Wallet\Models\WalletTransaction;
 use Anabil\Wallet\Tests\Concerns\ConfiguresWalletEnvironment;
 use Anabil\Wallet\WalletServiceProvider;
 use Closure;
@@ -242,6 +243,70 @@ abstract class TestCase extends Orchestra
         ]);
 
         return [$out, $in];
+    }
+
+    /**
+     * Simulates a concurrent reversal winning the race: $competitor runs
+     * once, right after the first query that looks for an existing
+     * reversal (reverses_id), i.e. between our check and our write.
+     */
+    protected function afterReversalCheck(Closure $competitor): void
+    {
+        $fired = false;
+
+        DB::listen(function (QueryExecuted $query) use (&$fired, $competitor): void {
+            if (! $fired
+                && str_starts_with(strtolower($query->sql), 'select')
+                && str_contains($query->sql, 'reverses_id')) {
+                $fired = true;
+                $competitor();
+            }
+        });
+    }
+
+    /**
+     * The fingerprint a reversal stores under its idempotency key. $original
+     * is the reversed entry (for a transfer: its transfer_out leg).
+     *
+     * @param  array<array-key, mixed>  $meta
+     */
+    protected function reversalFingerprint(
+        WalletTransaction $original,
+        ?string $description = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+        bool $force = false,
+    ): string {
+        return Fingerprint::for(
+            -$original->amountInMinor(),
+            Details::internal(CoreType::Reversal, null, $description, $meta, $performedBy),
+            ['operation' => 'reversal', 'reverses' => (string) $original->getKey(), 'force' => $force],
+        );
+    }
+
+    /**
+     * Records the reversal of $original the way a competing request would
+     * have (balance change plus linked ledger row), bypassing the package.
+     * Returns the new row's id.
+     */
+    protected function competingReversal(WalletTransaction $original, ?string $key = null, ?string $hash = null, ?string $group = null): int
+    {
+        $walletId = (int) $original->getRawOriginal('wallet_id');
+        $delta = -$original->amountInMinor();
+
+        DB::table($this->walletsTable())->where('id', $walletId)->increment('balance', $delta);
+
+        return $this->insertTransactionRow($walletId, [
+            'type' => 'reversal',
+            'amount' => $delta,
+            'balance_after' => (int) DB::table($this->walletsTable())->where('id', $walletId)->value('balance'),
+            'reference_type' => $original->getRawOriginal('reference_type'),
+            'reference_id' => $original->getRawOriginal('reference_id'),
+            'idempotency_key' => $key,
+            'idempotency_hash' => $key === null ? null : ($hash ?? $this->reversalFingerprint($original)),
+            'group_uuid' => $group,
+            'reverses_id' => $original->getKey(),
+        ]);
     }
 
     /**

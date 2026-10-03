@@ -6,11 +6,13 @@ namespace Anabil\Wallet\Ledger;
 
 use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Events\TransactionRecorded;
+use Anabil\Wallet\Events\TransactionReversed;
 use Anabil\Wallet\Events\TransferCompleted;
 use Anabil\Wallet\Exceptions\BalanceOverflow;
 use Anabil\Wallet\Exceptions\IdempotencyConflict;
 use Anabil\Wallet\Exceptions\InsufficientFunds;
 use Anabil\Wallet\Exceptions\InvalidAmount;
+use Anabil\Wallet\Exceptions\InvalidReversal;
 use Anabil\Wallet\Exceptions\InvalidTransaction;
 use Anabil\Wallet\Exceptions\InvalidTransfer;
 use Anabil\Wallet\Exceptions\WalletException;
@@ -27,6 +29,7 @@ use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Str;
 use RuntimeException;
+use Throwable;
 
 /**
  * The only code that moves money. Every call posts one or more legs (a
@@ -82,6 +85,16 @@ use RuntimeException;
  * For a transfer the key belongs to the sender: it is stored on the
  * sender's entry only (the recipient's entry has no key), so two senders
  * may use the same key towards the same recipient.
+ *
+ * Reversals: an entry is reversed by a new entry of the opposite amount
+ * whose reverses_id points at it; a transfer is reversed as a whole (both
+ * legs, in one posting). The unique index on reverses_id is what makes a
+ * reversal happen at most once: the "already reversed?" lookup before the
+ * write only avoids a pointless write in the common case. A concurrent
+ * reversal that commits first makes ours fail, either on that index or, when
+ * the winner's debit already took the money, on the guarded UPDATE; both
+ * roll back everything, and the winner is then looked up with a locking
+ * read, exactly like an idempotency race.
  *
  * @internal
  */
@@ -198,6 +211,98 @@ final class LedgerWriter
     }
 
     /**
+     * Reverses $original with a new entry of the opposite amount on the same
+     * wallet, linked through reverses_id and carrying the original's
+     * reference. A transfer leg reverses the whole transfer: one new entry
+     * per leg, sharing a new group uuid. Returns the reversal of $original.
+     *
+     * The debit side respects the minimum balance unless $force is true;
+     * the overflow guards always apply. With a key, it is stored on the
+     * reversal of the transfer_out leg for a transfer (the original
+     * sender's wallet), on the only reversal entry otherwise.
+     *
+     * @throws InvalidReversal when the entry is unsaved, a reversal, already reversed, or a leg of an incomplete transfer
+     * @throws InsufficientFunds when the debit side would drop below its minimum balance (and $force is false)
+     * @throws BalanceOverflow when a balance would overflow
+     * @throws WalletException when a wallet cannot be found
+     * @throws InvalidTransaction when the idempotency key is invalid
+     * @throws IdempotencyConflict when the key was already used on that wallet for a different operation
+     */
+    public function reverse(WalletTransaction $original, Details $details, bool $force = false, ?string $idempotencyKey = null): WalletTransaction
+    {
+        if (! $original->exists || $original->getKey() === null) {
+            throw InvalidReversal::unsaved();
+        }
+
+        $type = $original->getRawOriginal('type');
+
+        if ($type === CoreType::Reversal->value || $original->getRawOriginal('reverses_id') !== null) {
+            throw InvalidReversal::cannotReverseReversal($original);
+        }
+
+        if ($idempotencyKey !== null) {
+            self::assertIdempotencyKey($idempotencyKey);
+        }
+
+        // In leg order: for a transfer, its transfer_out leg first.
+        $originals = in_array($type, [CoreType::TransferOut->value, CoreType::TransferIn->value], true)
+            ? $this->transferLegs($original)
+            : [$original];
+
+        $called = $originals[0] === $original ? 0 : 1;
+        $legs = [];
+
+        foreach ($originals as $i => $entry) {
+            $delta = self::negated($entry);
+            $key = $i === 0 ? $idempotencyKey : null;
+
+            $legs[] = new Leg(
+                self::walletOf($entry),
+                $delta,
+                $details,
+                $key,
+                $key === null ? null : Fingerprint::for($delta, $details, [
+                    'operation' => 'reversal',
+                    'reverses' => (string) $entry->getKey(),
+                    'force' => $force,
+                ]),
+                enforceFloor: ! $force,
+                reverses: $entry,
+            );
+        }
+
+        if ($idempotencyKey !== null && ($existing = $this->findByKey($legs[0]->wallet, $idempotencyKey, lock: false))) {
+            return $this->replayReversal($legs, $originals, $called, $existing, lock: false);
+        }
+
+        if ($found = $this->findReversal($legs, $originals, lock: false)) {
+            throw InvalidReversal::alreadyReversed($found[0], $found[1]);
+        }
+
+        $transfer = count($legs) > 1;
+
+        try {
+            $reversals = $this->post(
+                $legs,
+                $transfer ? (string) Str::uuid7() : null,
+                $transfer ? self::TRANSFER_ATTEMPTS : 1,
+            );
+        } catch (UniqueConstraintViolationException|InsufficientFunds|BalanceOverflow $e) {
+            return $this->reversalWinner($legs, $originals, $called, $e);
+        }
+
+        foreach ($originals as $i => $entry) {
+            $entry->setRelation('reversal', $reversals[$i]);
+        }
+
+        foreach ($originals as $i => $entry) {
+            $this->dispatch(new TransactionReversed($entry, $reversals[$i]));
+        }
+
+        return $reversals[$called];
+    }
+
+    /**
      * Writes the legs in one database transaction, then syncs the wallet
      * instances and dispatches TransactionRecorded for each entry, in leg
      * order.
@@ -288,11 +393,17 @@ final class LedgerWriter
         $query = $this->walletRow($connection, $wallet);
         $grammar = $query->getGrammar();
 
-        if ($delta < 0) {
+        if ($delta < 0 && $leg->enforceFloor) {
             // The floor is checked by the UPDATE itself, against the row as
             // it is in the database.
             $affected = $query
                 ->whereRaw($grammar->wrap('balance').' + ? >= '.$grammar->wrap('min_balance'), [$delta])
+                ->decrement('balance', -$delta, $extra);
+        } elseif ($delta < 0) {
+            // A forced reversal: no floor, only the guard against going past
+            // the smallest storable balance. $delta is never PHP_INT_MIN.
+            $affected = $query
+                ->where('balance', '>=', PHP_INT_MIN - $delta)
                 ->decrement('balance', -$delta, $extra);
         } else {
             // No floor check: a wallet already below its floor (e.g. after
@@ -305,7 +416,7 @@ final class LedgerWriter
         }
 
         if ($affected === 0) {
-            throw $this->refusal($connection, $wallet, $delta);
+            throw $this->refusal($connection, $wallet, $delta, $leg->enforceFloor);
         }
 
         // The UPDATE above holds the row lock until commit, so this reads
@@ -322,6 +433,7 @@ final class LedgerWriter
     ): WalletTransaction {
         $wallet = $leg->wallet;
         $details = $leg->details;
+        $reverses = $leg->reverses;
 
         $class = Models::transaction();
         $transaction = new $class;
@@ -334,8 +446,11 @@ final class LedgerWriter
             'type' => $details->type,
             'amount' => $leg->delta,
             'balance_after' => $balance,
-            'reference_type' => $details->reference?->getMorphClass(),
-            'reference_id' => $details->reference?->getKey(),
+            // A reversal keeps the reference of the entry it reverses, as
+            // stored, so the referenced model does not need to be loaded
+            // (or even to exist any more).
+            'reference_type' => $reverses === null ? $details->reference?->getMorphClass() : $reverses->getRawOriginal('reference_type'),
+            'reference_id' => $reverses === null ? $details->reference?->getKey() : $reverses->getRawOriginal('reference_id'),
             'performed_by_type' => $details->performedBy?->getMorphClass(),
             'performed_by_id' => $details->performedBy?->getKey(),
             'description' => $details->description,
@@ -345,6 +460,10 @@ final class LedgerWriter
             'group_uuid' => $group,
             'created_at' => $now,
         ]);
+
+        if ($reverses !== null) {
+            $transaction->forceFill(['reverses_id' => $reverses->getKey()]);
+        }
 
         $keyName = $transaction->getKeyName();
 
@@ -552,9 +671,266 @@ final class LedgerWriter
     }
 
     /**
+     * Both legs of the transfer $leg belongs to, transfer_out first, with
+     * $leg itself in its slot. The group must hold exactly one transfer_out
+     * and one transfer_in entry (other entries of the group are ignored),
+     * the debit cancelling the credit out. The counterpart is loaded with
+     * its wallet.
+     *
+     * @return array{WalletTransaction, WalletTransaction}
+     *
+     * @throws InvalidReversal when the transfer is incomplete
+     */
+    private function transferLegs(WalletTransaction $leg): array
+    {
+        $group = $leg->getRawOriginal('group_uuid');
+
+        if (! is_string($group) || $group === '') {
+            throw InvalidReversal::incompleteTransfer($leg);
+        }
+
+        $class = Models::transaction();
+        $model = (new $class)->setConnection($leg->getConnectionName());
+
+        $rows = $model->newQuery()
+            ->without('wallet')
+            ->where('group_uuid', $group)
+            ->whereIn('type', [CoreType::TransferOut->value, CoreType::TransferIn->value])
+            ->orderBy($model->getKeyName())
+            ->get();
+
+        $self = $rows->first(fn (WalletTransaction $row): bool => (string) $row->getKey() === (string) $leg->getKey());
+        $counterpart = $rows->first(fn (WalletTransaction $row): bool => (string) $row->getKey() !== (string) $leg->getKey());
+
+        if ($rows->count() !== 2 || $self === null || $counterpart === null) {
+            throw InvalidReversal::incompleteTransfer($leg);
+        }
+
+        [$out, $in] = $leg->getRawOriginal('type') === CoreType::TransferOut->value
+            ? [$leg, $counterpart]
+            : [$counterpart, $leg];
+
+        // Checked against the stored rows, not the (possibly stale) instance.
+        if ($self->getRawOriginal('type') !== $leg->getRawOriginal('type')
+            || $self->amountInMinor() !== $leg->amountInMinor()
+            || (string) $self->getRawOriginal('wallet_id') !== (string) $leg->getRawOriginal('wallet_id')
+            || $out->getRawOriginal('type') !== CoreType::TransferOut->value
+            || $in->getRawOriginal('type') !== CoreType::TransferIn->value
+            || $out->amountInMinor() >= 0
+            || $out->amountInMinor() !== -$in->amountInMinor()) {
+            throw InvalidReversal::incompleteTransfer($leg);
+        }
+
+        $counterpart->load('wallet');
+
+        return [$out, $in];
+    }
+
+    /**
+     * The wallet a reversed entry lives on: the instance it carries, or
+     * loaded through its relation.
+     *
+     * @throws WalletException
+     */
+    private static function walletOf(WalletTransaction $entry): Wallet
+    {
+        $wallet = $entry->getRelationValue('wallet');
+
+        if (! $wallet instanceof Wallet) {
+            throw new WalletException(sprintf(
+                'Cannot reverse wallet transaction [%s]: its wallet [%s] was not found.',
+                (string) $entry->getKey(),
+                (string) $entry->getRawOriginal('wallet_id'),
+            ));
+        }
+
+        self::assertSaved($wallet);
+
+        return $wallet;
+    }
+
+    /**
+     * The amount that undoes $entry, in minor units.
+     *
+     * @throws InvalidReversal
+     */
+    private static function negated(WalletTransaction $entry): int
+    {
+        $amount = $entry->amountInMinor();
+
+        if ($amount === 0 || $amount === PHP_INT_MIN) {
+            throw InvalidReversal::unreversibleAmount($entry);
+        }
+
+        return -$amount;
+    }
+
+    /**
+     * The first reversal already recorded for any of $originals, with the
+     * entry it reverses. With $lock the read is a locking (shared) read,
+     * for the same snapshot reasons as findByKey().
+     *
+     * @param  non-empty-list<Leg>  $legs
+     * @param  non-empty-list<WalletTransaction>  $originals  in leg order
+     * @return array{WalletTransaction, WalletTransaction}|null the reversed entry and its reversal
+     */
+    private function findReversal(array $legs, array $originals, bool $lock): ?array
+    {
+        $class = Models::transaction();
+        $model = (new $class)->setConnection($originals[0]->getConnectionName());
+
+        $query = $model->newQuery()
+            ->without('wallet')
+            ->whereIn('reverses_id', array_map(fn (WalletTransaction $entry): mixed => $entry->getKey(), $originals))
+            ->orderBy($model->getKeyName());
+
+        if ($lock) {
+            $query->sharedLock();
+        }
+
+        $reversal = $query->first();
+
+        if ($reversal === null) {
+            return null;
+        }
+
+        foreach ($originals as $i => $entry) {
+            if ((string) $entry->getKey() === (string) $reversal->getRawOriginal('reverses_id')) {
+                $this->attachReversal($reversal, $legs[$i], $entry, replay: false);
+
+                return [$entry, $reversal];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The reversal of $entry, if recorded. Locking like findReversal().
+     */
+    private function reversalOf(WalletTransaction $entry, bool $lock): ?WalletTransaction
+    {
+        $class = Models::transaction();
+
+        $query = (new $class)->setConnection($entry->getConnectionName())->newQuery()
+            ->without('wallet')
+            ->where('reverses_id', $entry->getKey());
+
+        if ($lock) {
+            $query->sharedLock();
+        }
+
+        return $query->first();
+    }
+
+    /**
+     * After the reversal's write failed on a unique index (reverses_id or
+     * the idempotency key) or on a guarded UPDATE: a concurrent reversal may
+     * have committed first (when its debit took the money, ours fails on
+     * the UPDATE before reaching the index). Everything was rolled back. A
+     * keyed winner is replayed (or reported as a conflict); any other
+     * reversal of these entries makes this one "already reversed".
+     * Otherwise the failure was genuine and is rethrown.
+     *
+     * @param  non-empty-list<Leg>  $legs
+     * @param  non-empty-list<WalletTransaction>  $originals
+     *
+     * @throws InvalidReversal
+     * @throws IdempotencyConflict
+     */
+    private function reversalWinner(
+        array $legs,
+        array $originals,
+        int $called,
+        UniqueConstraintViolationException|InsufficientFunds|BalanceOverflow $e,
+    ): WalletTransaction {
+        $keyed = $legs[0];
+
+        if ($keyed->idempotencyKey !== null
+            && ($existing = $this->findByKey($keyed->wallet, $keyed->idempotencyKey, lock: true))) {
+            return $this->replayReversal($legs, $originals, $called, $existing, lock: true, previous: $e);
+        }
+
+        if ($found = $this->findReversal($legs, $originals, lock: true)) {
+            throw InvalidReversal::alreadyReversed($found[0], $found[1], $e);
+        }
+
+        throw $e;
+    }
+
+    /**
+     * Returns the reversal already recorded under the key when it describes
+     * the same reversal (same fingerprint, which covers the reversed entry,
+     * the details and $force). For a transfer the key sits on the reversal
+     * of the transfer_out leg; when reverse() was called on the transfer_in
+     * leg, its own reversal is looked up and returned. Nothing is written,
+     * no event is dispatched and no wallet instance is touched.
+     *
+     * @param  non-empty-list<Leg>  $legs
+     * @param  non-empty-list<WalletTransaction>  $originals
+     *
+     * @throws IdempotencyConflict
+     */
+    private function replayReversal(
+        array $legs,
+        array $originals,
+        int $called,
+        WalletTransaction $existing,
+        bool $lock,
+        ?Throwable $previous = null,
+    ): WalletTransaction {
+        $keyed = $legs[0];
+        $key = (string) $keyed->idempotencyKey;
+
+        $this->assertSameOperation($keyed, $existing, $previous);
+
+        // Equal fingerprints already mean the same reversed entry; this only
+        // guards against an edited row.
+        if ((string) $existing->getRawOriginal('reverses_id') !== (string) $originals[0]->getKey()) {
+            throw IdempotencyConflict::for($keyed->wallet, $key, $existing, $previous);
+        }
+
+        $this->attachReversal($existing, $keyed, $originals[0], replay: true);
+
+        $entry = $originals[$called] ?? null;
+        $leg = $legs[$called] ?? null;
+
+        if ($called === 0 || $entry === null || $leg === null) {
+            return $existing;
+        }
+
+        $reversal = $this->reversalOf($entry, $lock)
+            ?? throw IdempotencyConflict::incompleteTransfer($keyed->wallet, $key, $existing, $previous);
+
+        $this->attachReversal($reversal, $leg, $entry, replay: true);
+
+        return $reversal;
+    }
+
+    /**
+     * Links a reversal read back from the database to the request's
+     * instances: the wallet (when it is the one the reversal sits on), the
+     * reference, the reversed entry, and the reverse relation on that entry.
+     * Only a replay (equal fingerprints) also gets the request's actor.
+     */
+    private function attachReversal(WalletTransaction $reversal, Leg $leg, WalletTransaction $entry, bool $replay): void
+    {
+        if ((string) $reversal->getRawOriginal('wallet_id') === (string) $leg->wallet->getKey()) {
+            $this->attachRelations($reversal, $leg);
+
+            if (! $replay) {
+                $reversal->unsetRelation('performedBy');
+            }
+        }
+
+        $reversal->setRelation('reverses', $entry);
+        $entry->setRelation('reversal', $reversal);
+    }
+
+    /**
      * @throws IdempotencyConflict when the stored fingerprint differs from the leg's
      */
-    private function assertSameOperation(Leg $leg, WalletTransaction $existing, ?UniqueConstraintViolationException $previous): void
+    private function assertSameOperation(Leg $leg, WalletTransaction $existing, ?Throwable $previous): void
     {
         $stored = $existing->getRawOriginal('idempotency_hash');
 
@@ -566,14 +942,31 @@ final class LedgerWriter
     private function attachRelations(WalletTransaction $transaction, Leg $leg): void
     {
         $transaction->setRelation('wallet', $leg->wallet);
-        $transaction->setRelation('reference', $leg->details->reference);
         $transaction->setRelation('performedBy', $leg->details->performedBy);
+
+        $reverses = $leg->reverses;
+
+        if ($reverses === null) {
+            $transaction->setRelation('reference', $leg->details->reference);
+
+            return;
+        }
+
+        // The reference is the reversed entry's: reuse its loaded model, or
+        // leave the relation to load lazily.
+        if ($reverses->relationLoaded('reference')) {
+            $transaction->setRelation('reference', $reverses->getRelation('reference'));
+        } elseif ($reverses->getRawOriginal('reference_type') === null) {
+            $transaction->setRelation('reference', null);
+        }
+
+        $transaction->setRelation('reverses', $reverses);
     }
 
     /**
      * Explains why the guarded UPDATE matched no row.
      */
-    private function refusal(Connection $connection, Wallet $wallet, int $delta): WalletException
+    private function refusal(Connection $connection, Wallet $wallet, int $delta, bool $enforceFloor): WalletException
     {
         $row = $this->walletRow($connection, $wallet)->first(['balance', 'min_balance']);
 
@@ -583,9 +976,13 @@ final class LedgerWriter
 
         $balance = (int) $row->balance;
 
-        return $delta < 0
+        if ($delta >= 0) {
+            return BalanceOverflow::for($wallet, $delta, $balance);
+        }
+
+        return $enforceFloor
             ? InsufficientFunds::for($wallet, -$delta, $balance, (int) $row->min_balance)
-            : BalanceOverflow::for($wallet, $delta, $balance);
+            : BalanceOverflow::forDebit($wallet, -$delta, $balance);
     }
 
     private function walletRow(Connection $connection, Wallet $wallet): QueryBuilder

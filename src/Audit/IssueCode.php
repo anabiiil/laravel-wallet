@@ -42,7 +42,8 @@ enum IssueCode: string
     case InvalidScale = 'invalid_scale';
 
     /**
-     * A transfer group's legs do not sum to zero.
+     * A group's legs do not sum to zero (a transfer, or the reversal of
+     * one).
      */
     case UnbalancedGroup = 'unbalanced_group';
 
@@ -56,6 +57,19 @@ enum IssueCode: string
      * A transfer_out or transfer_in row has no group_uuid.
      */
     case TransferWithoutGroup = 'transfer_without_group';
+
+    /**
+     * A row with a reverses_id does not undo the entry it points at: its
+     * amount is not the exact opposite, it sits on another wallet, it is not
+     * of type reversal, or the entry it points at does not exist.
+     */
+    case InvalidReversal = 'invalid_reversal';
+
+    /**
+     * A reversal-type row has no reverses_id, so nothing says what it
+     * reverses.
+     */
+    case ReversalWithoutLink = 'reversal_without_link';
 
     /**
      * Whether this code fails Report::passed() (Error) or is merely

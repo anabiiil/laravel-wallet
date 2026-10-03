@@ -36,17 +36,24 @@ use stdClass;
  * outer query rather than inside the window clause itself, which is what
  * makes it portable to MySQL 8, PostgreSQL and SQLite 3.25+ alike.
  *
- * Per transfer group (unbalanced_group, malformed_transfer) and per loose
- * leg (transfer_without_group): streamed with a cursor rather than loaded
- * at once. A "transfer group" is any group_uuid carried by at least one
- * transfer_out or transfer_in row, but unbalanced_group sums every row
- * sharing that group_uuid, not only its transfer legs: later phases may add
- * more legs to a group (fees, reversals), and those must count towards it
- * balancing to zero. malformed_transfer still only counts the
- * transfer_out/transfer_in legs, since that check is specifically about
- * there being exactly one of each. When $walletIds scopes the audit, group
- * checks still cover every row of a group that touches one of those
- * wallets, even legs that sit on a wallet outside the scope.
+ * Per reversal row (invalid_reversal, reversal_without_link): a third
+ * single statement per chunk, the chunk's rows that have a reverses_id
+ * joined to the rows they point at (or that are of type reversal without
+ * one), filtered in SQL down to the offending rows only.
+ *
+ * Per group (unbalanced_group, malformed_transfer) and per loose leg
+ * (transfer_without_group): streamed with a cursor rather than loaded at
+ * once. A group is any group_uuid carried by at least one transfer_out,
+ * transfer_in or reversal row (the reversal of a transfer shares a group
+ * of its own), and unbalanced_group sums every row sharing that
+ * group_uuid, not only those legs: later phases may add more legs to a
+ * group (fees), and those must count towards it balancing to zero.
+ * malformed_transfer only applies to groups holding transfer legs and only
+ * counts the transfer_out/transfer_in legs, since that check is
+ * specifically about there being exactly one of each. When $walletIds
+ * scopes the audit, group checks still cover every row of a group that
+ * touches one of those wallets, even legs that sit on a wallet outside the
+ * scope.
  */
 final class WalletAuditor
 {
@@ -94,6 +101,10 @@ final class WalletAuditor
 
             foreach ($this->firstBrokenRowPerWallet($chain) as $walletId => $data) {
                 $issues[] = $this->brokenChainIssue($walletId, $data, $byId);
+            }
+
+            foreach ($this->fetchBadReversals($connection, $transactionsTable, $chunkIds) as $row) {
+                $issues[] = $this->reversalIssue($row, $byId);
             }
         }
 
@@ -329,6 +340,133 @@ final class WalletAuditor
     }
 
     /**
+     * The single statement behind invalid_reversal and
+     * reversal_without_link: the chunk's rows that point at a reversed
+     * entry, joined to it, plus its reversal-type rows that point at
+     * nothing, keeping only those that break a rule. The amount comparison
+     * sits in a CASE so the smallest 64-bit value (which has no opposite)
+     * is reported instead of making the negation overflow.
+     *
+     * @param  list<int>  $ids  non-empty
+     * @return Collection<int, stdClass>
+     */
+    private function fetchBadReversals(Connection $connection, string $transactionsTable, array $ids): Collection
+    {
+        $reversal = CoreType::Reversal->value;
+
+        return $connection->table($transactionsTable.' as r')
+            ->leftJoin($transactionsTable.' as o', 'o.id', '=', 'r.reverses_id')
+            ->whereIn('r.wallet_id', $ids)
+            ->where(function ($query) use ($reversal): void {
+                $query
+                    ->where(function ($query) use ($reversal): void {
+                        $query->where('r.type', $reversal)->whereNull('r.reverses_id');
+                    })
+                    ->orWhere(function ($query) use ($reversal): void {
+                        $query->whereNotNull('r.reverses_id')->where(function ($query) use ($reversal): void {
+                            $query->whereNull('o.id')
+                                ->orWhere('r.type', '<>', $reversal)
+                                ->orWhereColumn('r.wallet_id', '<>', 'o.wallet_id')
+                                ->orWhereRaw('(CASE WHEN o.amount = ? THEN 1 WHEN r.amount <> -o.amount THEN 1 ELSE 0 END) = 1', [PHP_INT_MIN]);
+                        });
+                    });
+            })
+            ->orderBy('r.wallet_id')
+            ->orderBy('r.id')
+            ->get([
+                'r.id as id',
+                'r.wallet_id as wallet_id',
+                'r.type as type',
+                'r.amount as amount',
+                'r.reverses_id as reverses_id',
+                'o.id as original_id',
+                'o.wallet_id as original_wallet_id',
+                'o.amount as original_amount',
+            ]);
+    }
+
+    /**
+     * @param  array<int, stdClass>  $byId  the chunk's wallet aggregate rows, for scale/currency
+     */
+    private function reversalIssue(stdClass $row, array $byId): Issue
+    {
+        $transactionId = (int) $row->id;
+        $walletId = (int) $row->wallet_id;
+        $type = (string) $row->type;
+        $amount = (int) $row->amount;
+
+        $scale = isset($byId[$walletId]) ? (int) $byId[$walletId]->scale : 2;
+        $currency = isset($byId[$walletId]) ? (string) $byId[$walletId]->currency : '';
+
+        if ($row->reverses_id === null) {
+            return new Issue(
+                IssueCode::ReversalWithoutLink,
+                walletId: $walletId,
+                groupUuid: null,
+                transactionId: $transactionId,
+                message: sprintf(
+                    'Ledger row %d on wallet %d is a reversal of %s that does not say which entry it reverses (no reverses_id).',
+                    $transactionId,
+                    $walletId,
+                    $this->money($amount, $scale, $currency),
+                ),
+                context: ['amount' => $amount],
+            );
+        }
+
+        $reversesId = (int) $row->reverses_id;
+        $originalAmount = $row->original_amount === null ? null : (int) $row->original_amount;
+        $originalWalletId = $row->original_wallet_id === null ? null : (int) $row->original_wallet_id;
+
+        $problems = [];
+
+        if ($row->original_id === null) {
+            $problems[] = 'missing_original';
+        } else {
+            if ($originalAmount === PHP_INT_MIN || $amount !== -$originalAmount) {
+                $problems[] = 'amount';
+            }
+
+            if ($originalWalletId !== $walletId) {
+                $problems[] = 'wallet';
+            }
+        }
+
+        if ($type !== CoreType::Reversal->value) {
+            $problems[] = 'type';
+        }
+
+        $reasons = array_map(fn (string $problem): string => match ($problem) {
+            'missing_original' => 'that entry does not exist',
+            'amount' => sprintf('its amount %s is not the opposite of %s', $this->money($amount, $scale, $currency), $this->money((int) $originalAmount, $scale, $currency)),
+            'wallet' => sprintf('it sits on wallet %d while that entry is on wallet %d', $walletId, (int) $originalWalletId),
+            default => sprintf('its type is %s instead of reversal', $type),
+        }, $problems);
+
+        return new Issue(
+            IssueCode::InvalidReversal,
+            walletId: $walletId,
+            groupUuid: null,
+            transactionId: $transactionId,
+            message: sprintf(
+                'Ledger row %d on wallet %d reverses row %d, but %s.',
+                $transactionId,
+                $walletId,
+                $reversesId,
+                implode(', and ', $reasons),
+            ),
+            context: [
+                'reverses_id' => $reversesId,
+                'problems' => $problems,
+                'amount' => $amount,
+                'original_amount' => $originalAmount,
+                'original_wallet_id' => $originalWalletId,
+                'type' => $type,
+            ],
+        );
+    }
+
+    /**
      * unbalanced_group, malformed_transfer and transfer_without_group.
      * Streamed with cursors rather than loaded at once; when $walletIds
      * scopes the audit, the group-level checks still look at every leg of
@@ -357,14 +495,14 @@ final class WalletAuditor
             $issues[] = $this->transferWithoutGroupIssue($row);
         }
 
-        // The group_uuids that make a "transfer group": any group_uuid
-        // carried by at least one transfer_out/transfer_in row, scoped to
-        // the audited wallets when given. This is a subquery, not a value
+        // The group_uuids that make a group: any group_uuid carried by at
+        // least one transfer_out/transfer_in/reversal row, scoped to the
+        // audited wallets when given. This is a subquery, not a value
         // pulled into PHP, so the next query (and its SUM) stays a single
         // statement regardless of how many groups exist.
         $transferGroupUuids = $connection->table($transactionsTable)
             ->select('group_uuid')
-            ->whereIn('type', $transferTypes)
+            ->whereIn('type', [...$transferTypes, CoreType::Reversal->value])
             ->whereNotNull('group_uuid')
             ->distinct();
 
@@ -374,9 +512,9 @@ final class WalletAuditor
 
         // Joining the full ledger table to that subquery, rather than
         // filtering it by type, is what makes the aggregate sum, and count,
-        // EVERY row sharing the group_uuid -- including a fee or reversal
-        // leg a later phase might add to it -- instead of only its
-        // transfer_out/transfer_in legs.
+        // EVERY row sharing the group_uuid -- including a fee leg a later
+        // phase might add to it -- instead of only its transfer_out /
+        // transfer_in / reversal legs.
         $groups = $connection->table($transactionsTable.' as t')
             ->joinSub($transferGroupUuids, 'tg', 'tg.group_uuid', '=', 't.group_uuid')
             ->select('t.group_uuid')
@@ -449,6 +587,9 @@ final class WalletAuditor
 
         $issues = [];
 
+        // A group without transfer legs is the reversal of a transfer.
+        $isTransfer = $outCount + $inCount > 0;
+
         if ($total !== 0) {
             $issues[] = new Issue(
                 IssueCode::UnbalancedGroup,
@@ -456,7 +597,8 @@ final class WalletAuditor
                 groupUuid: $groupUuid,
                 transactionId: null,
                 message: sprintf(
-                    'Transfer group %s does not balance to zero: its %d row(s) sum to %s.',
+                    '%s group %s does not balance to zero: its %d row(s) sum to %s.',
+                    $isTransfer ? 'Transfer' : 'Reversal',
                     $groupUuid,
                     $legCount,
                     $this->money($total, $scale, $currency),
@@ -465,7 +607,7 @@ final class WalletAuditor
             );
         }
 
-        if ($outCount !== 1 || $inCount !== 1) {
+        if ($isTransfer && ($outCount !== 1 || $inCount !== 1)) {
             $issues[] = new Issue(
                 IssueCode::MalformedTransfer,
                 walletId: null,

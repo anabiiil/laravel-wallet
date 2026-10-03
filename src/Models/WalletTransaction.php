@@ -7,8 +7,15 @@ namespace Anabil\Wallet\Models;
 use Anabil\Wallet\Contracts\TransactionType;
 use Anabil\Wallet\Database\WalletTransactionBuilder;
 use Anabil\Wallet\Enums\CoreType;
+use Anabil\Wallet\Exceptions\BalanceOverflow;
+use Anabil\Wallet\Exceptions\IdempotencyConflict;
 use Anabil\Wallet\Exceptions\ImmutableTransaction;
+use Anabil\Wallet\Exceptions\InsufficientFunds;
+use Anabil\Wallet\Exceptions\InvalidReversal;
+use Anabil\Wallet\Exceptions\InvalidTransaction;
 use Anabil\Wallet\Exceptions\WalletException;
+use Anabil\Wallet\Ledger\Details;
+use Anabil\Wallet\Ledger\LedgerWriter;
 use Anabil\Wallet\Support\Amount;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\Types;
@@ -36,6 +43,9 @@ use Illuminate\Support\Carbon;
  * the wallet relation, which is therefore always eager loaded ($with); the
  * entries the package returns, and those read through
  * $wallet->transactions(), already carry their wallet.
+ *
+ * Mistakes are undone with reverse(), which appends a linked entry of the
+ * opposite amount; the entry itself is never changed.
  *
  * @property int $id
  * @property int $wallet_id
@@ -124,7 +134,8 @@ class WalletTransaction extends Model
     }
 
     /**
-     * The entry that reverses this one, if it has been reversed.
+     * The entry that reverses this one, if it has been reversed. At most one
+     * can exist (a unique index on reverses_id).
      *
      * @return HasOne<WalletTransaction, $this>
      */
@@ -185,8 +196,9 @@ class WalletTransaction extends Model
 
     /**
      * The other entry of the same operation (for a transfer: the
-     * recipient's entry of a transfer_out, the sender's of a transfer_in),
-     * or null when this entry is not part of a group. Read on this entry's
+     * recipient's entry of a transfer_out, the sender's of a transfer_in;
+     * for the reversal of a transfer: the reversal of the other leg), or
+     * null when this entry is not part of a group. Read on this entry's
      * connection; not cached.
      */
     public function counterpart(): ?WalletTransaction
@@ -202,11 +214,13 @@ class WalletTransaction extends Model
             ->whereKeyNot($this->getKey())
             ->orderBy($this->getKeyName());
 
-        // A transfer leg's counterpart is the opposite transfer leg, even
-        // once other entries (e.g. fees) share the group.
+        // A transfer leg's counterpart is the opposite transfer leg, and a
+        // reversal's the other reversal of its group, even once other
+        // entries (e.g. fees) share the group.
         $counterType = match ($this->getRawOriginal('type') ?? $this->getAttributes()['type'] ?? null) {
             CoreType::TransferOut->value => CoreType::TransferIn,
             CoreType::TransferIn->value => CoreType::TransferOut,
+            CoreType::Reversal->value => CoreType::Reversal,
             default => null,
         };
 
@@ -225,6 +239,75 @@ class WalletTransaction extends Model
     public function isDebit(): bool
     {
         return $this->amountInMinor() < 0;
+    }
+
+    /**
+     * Whether this entry is a reversal (of type reversal) of another one.
+     */
+    public function isReversal(): bool
+    {
+        return ($this->getRawOriginal('type') ?? $this->getAttributes()['type'] ?? null) === CoreType::Reversal->value;
+    }
+
+    /**
+     * Whether this entry has been reversed. Reads the reversal relation,
+     * which runs a query per entry unless it is loaded: eager load it
+     * (->with('reversal')) when checking many entries, or filter with
+     * whereReversed() / whereNotReversed(). An entry this process reversed
+     * (or found already reversed) has the relation set already.
+     */
+    public function isReversed(): bool
+    {
+        return $this->getRelationValue('reversal') !== null;
+    }
+
+    /**
+     * Undoes this entry by recording a new one of the opposite amount on the
+     * same wallet: type reversal, linked through reverses_id and carrying
+     * this entry's reference (so the entries of a reference still net to
+     * zero). The description, meta and actor are the reversal's own. The
+     * entry itself is never changed. Returns the reversal entry; the wallet
+     * instance this entry carries holds the new balance afterwards.
+     *
+     * A transfer leg (transfer_out or transfer_in) reverses the whole
+     * transfer, atomically: one reversal per leg, sharing a new group uuid
+     * (counterpart() links them). The reversal of this leg is returned.
+     *
+     * The debit side (reversing a credit) respects the wallet's minimum
+     * balance like a withdrawal. $force skips that check for this reversal
+     * only (e.g. a chargeback after the money was spent), so the balance may
+     * end up below its minimum; the overflow guards always apply.
+     *
+     * An entry can be reversed once, and a reversal cannot be reversed.
+     * Partial reversals are not supported: record a partial refund as a
+     * normal entry (e.g. a deposit with your refund type and the order as
+     * reference).
+     *
+     * With an $idempotencyKey (at most 128 characters, unique per wallet;
+     * for a transfer, per wallet of the original sender, where it is
+     * stored), repeating the same call returns the reversal recorded the
+     * first time instead of failing as already reversed; reusing the key
+     * for a different operation throws IdempotencyConflict. A replay does
+     * not change any wallet instance.
+     *
+     * @param  array<array-key, mixed>  $meta
+     *
+     * @throws InvalidReversal when this entry is unsaved, a reversal, already reversed, or a leg of an incomplete transfer
+     * @throws InsufficientFunds when the debit side would drop below its minimum balance and $force is false
+     * @throws BalanceOverflow when a balance would overflow
+     * @throws InvalidTransaction when the details or idempotency key are invalid
+     * @throws IdempotencyConflict when the key was already used on that wallet for a different operation
+     */
+    public function reverse(
+        ?string $description = null,
+        array $meta = [],
+        ?Model $performedBy = null,
+        bool $force = false,
+        ?string $idempotencyKey = null,
+    ): WalletTransaction {
+        $details = Details::internal(CoreType::Reversal, null, $description, $meta, $performedBy);
+
+        return (new LedgerWriter)->reverse($this, $details, $force, $idempotencyKey);
     }
 
     /**
