@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Tests;
 
+use Anabil\Wallet\Audit\WalletAuditor;
 use Anabil\Wallet\Enums\CoreType;
 use Anabil\Wallet\Ledger\Details;
 use Anabil\Wallet\Ledger\Fingerprint;
@@ -134,6 +135,15 @@ abstract class TestCase extends Orchestra
     protected function ledgerSum(int $walletId): int
     {
         return (int) DB::table($this->transactionsTable())->where('wallet_id', $walletId)->sum('amount');
+    }
+
+    /**
+     * The bound WalletAuditor, resolved from the container like application
+     * code would (it is registered as a singleton by WalletServiceProvider).
+     */
+    protected function auditor(): WalletAuditor
+    {
+        return $this->app->make(WalletAuditor::class);
     }
 
     /**

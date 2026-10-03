@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet;
 
+use Anabil\Wallet\Audit\WalletAuditor;
+use Anabil\Wallet\Console\CheckWalletsCommand;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\ServiceProvider;
@@ -17,6 +19,10 @@ class WalletServiceProvider extends ServiceProvider
         // Stateless (see WalletManager's docblock), so a singleton is safe
         // under Octane: nothing it resolves is cached on the instance.
         $this->app->singleton(WalletManager::class);
+
+        // Stateless too (see its own docblock): it holds no per-call data,
+        // only the connection and table names it reads fresh each audit.
+        $this->app->singleton(WalletAuditor::class);
     }
 
     public function boot(): void
@@ -31,6 +37,10 @@ class WalletServiceProvider extends ServiceProvider
             $this->publishesMigrations([
                 __DIR__.'/../database/migrations' => $this->app->databasePath('migrations'),
             ], 'wallet-migrations');
+
+            $this->commands([
+                CheckWalletsCommand::class,
+            ]);
         }
     }
 
