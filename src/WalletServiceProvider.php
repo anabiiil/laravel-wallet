@@ -13,6 +13,10 @@ class WalletServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/wallet.php', 'wallet');
+
+        // Stateless (see WalletManager's docblock), so a singleton is safe
+        // under Octane: nothing it resolves is cached on the instance.
+        $this->app->singleton(WalletManager::class);
     }
 
     public function boot(): void

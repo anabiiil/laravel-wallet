@@ -65,4 +65,12 @@ class InvalidConfiguration extends WalletException
             get_debug_type($value),
         ));
     }
+
+    public static function guardsNotListOfStrings(mixed $value): self
+    {
+        return new self(sprintf(
+            'The [wallet.guards] config must be a list of non-empty guard names (strings), got [%s].',
+            is_scalar($value) ? var_export($value, true) : get_debug_type($value),
+        ));
+    }
 }

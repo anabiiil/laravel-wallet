@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Anabil\Wallet\Tests\Concerns;
 
 use Anabil\Wallet\Tests\Fixtures\Admin;
+use Anabil\Wallet\Tests\Fixtures\Guest;
 use Anabil\Wallet\Tests\Fixtures\Merchant;
 use Anabil\Wallet\Tests\Fixtures\Order;
 use Anabil\Wallet\Tests\Fixtures\User;
@@ -24,6 +25,23 @@ trait ConfiguresWalletEnvironment
             'merchant' => Merchant::class,
             'admin' => Admin::class,
         ]);
+
+        // WalletManager (Wallets::holder()) checks these guards, in order,
+        // to find who is currently authenticated.
+        $app['config']->set('wallet.guards', ['web', 'merchant', 'admin']);
+
+        $app['config']->set('auth.providers.users.model', User::class);
+
+        // Guards behind which the holder fixtures (and the non-holder Guest
+        // fixture) can authenticate, each with its own Eloquent provider.
+        foreach ([
+            'merchant' => Merchant::class,
+            'admin' => Admin::class,
+            'guest' => Guest::class,
+        ] as $guard => $model) {
+            $app['config']->set("auth.guards.{$guard}", ['driver' => 'session', 'provider' => $guard.'s']);
+            $app['config']->set("auth.providers.{$guard}s", ['driver' => 'eloquent', 'model' => $model]);
+        }
 
         // Transaction references are stored with a morph alias too.
         Relation::morphMap(['order' => Order::class]);

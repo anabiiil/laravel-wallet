@@ -116,6 +116,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Authentication Guards
+    |--------------------------------------------------------------------------
+    |
+    | Guards that Wallets::holder() checks, in order, to find who is
+    | currently authenticated. List every guard whose users own wallets
+    | (e.g. 'web', 'merchant', 'admin'). The first configured guard with an
+    | authenticated user that holds wallets wins. Guards that are not
+    | defined in [auth.guards] are skipped rather than erroring, so this
+    | list may safely mention a guard the application has not set up yet.
+    |
+    */
+
+    'guards' => ['web'],
+
+    /*
+    |--------------------------------------------------------------------------
     | Table Names
     |--------------------------------------------------------------------------
     */
