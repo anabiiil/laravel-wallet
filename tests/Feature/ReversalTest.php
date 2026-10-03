@@ -649,6 +649,24 @@ it('replays the winner of a race with a matching key', function (): void {
         ->and($this->events->getArrayCopy())->toBe([]);
 });
 
+it('replays a keyed winner that commits between the key lookup and the reversal check', function (): void {
+    $deposit = $this->wallet->deposit(100);
+
+    $winner = null;
+    $this->afterIdempotencyLookup(function () use (&$winner, $deposit): void {
+        $winner = $this->competingReversal($deposit, 'race');
+    });
+    $this->events->exchangeArray([]);
+
+    $reversal = $deposit->reverse(idempotencyKey: 'race');
+
+    expect($reversal->id)->toBe($winner)
+        ->and($reversal->wasRecentlyCreated)->toBeFalse()
+        ->and(DB::table($this->transactionsTable())->where('reverses_id', $deposit->id)->count())->toBe(1)
+        ->and((int) $this->walletRow($this->wallet->id)['balance'])->toBe(0)
+        ->and($this->events->getArrayCopy())->toBe([]);
+});
+
 it('throws a conflict when the race winner used the key for something else', function (): void {
     $deposit = $this->wallet->deposit(100);
     $this->wallet->deposit(100);

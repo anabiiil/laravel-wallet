@@ -19,6 +19,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Orchestra\Testbench\TestCase as Orchestra;
+use Throwable;
 
 /**
  * Testbench boots a minimal Laravel app in memory so the package can be
@@ -128,6 +129,59 @@ abstract class TestCase extends Orchestra
     protected function forceBalance(int $walletId, int $balance): void
     {
         DB::table($this->walletsTable())->where('id', $walletId)->update(['balance' => $balance]);
+    }
+
+    /**
+     * Overwrites a wallet's status directly, bypassing freeze() / close().
+     * Only for setting up edge cases (a stale instance, a corrupted row).
+     */
+    protected function forceStatus(int $walletId, string $status): void
+    {
+        DB::table($this->walletsTable())->where('id', $walletId)->update(['status' => $status]);
+    }
+
+    /**
+     * Runs $write, which must throw $exception (with $message in its
+     * message, when given), and asserts it wrote nothing: the same ledger
+     * rows, the same wallet rows, and the same, clean, in-memory balance
+     * and status on every wallet in $wallets. Returns the exception.
+     *
+     * @template TException of Throwable
+     *
+     * @param  class-string<TException>  $exception
+     * @return TException
+     */
+    protected function assertRefusedWithoutWrites(Closure $write, string $exception, ?string $message = null, Wallet ...$wallets): Throwable
+    {
+        $walletRows = fn (): array => DB::table($this->walletsTable())->orderBy('id')->get()
+            ->map(fn (object $row): array => (array) $row)->values()->all();
+        $memory = fn (): array => array_map(
+            fn (Wallet $wallet): array => [$wallet->balance, $wallet->getAttributes()['status'] ?? null, $wallet->isDirty()],
+            $wallets,
+        );
+
+        $ledgerBefore = $this->transactionRows();
+        $walletsBefore = $walletRows();
+        $memoryBefore = $memory();
+        $caught = null;
+
+        try {
+            $write();
+        } catch (Throwable $e) {
+            $caught = $e;
+        }
+
+        $this->assertInstanceOf($exception, $caught, $caught === null ? 'Nothing was thrown.' : $caught::class.': '.$caught->getMessage());
+
+        if ($message !== null) {
+            $this->assertStringContainsString($message, $caught->getMessage());
+        }
+
+        $this->assertSame($ledgerBefore, $this->transactionRows(), 'A ledger row was written.');
+        $this->assertSame($walletsBefore, $walletRows(), 'A wallet row changed.');
+        $this->assertSame($memoryBefore, $memory(), 'A wallet instance changed.');
+
+        return $caught;
     }
 
     /**

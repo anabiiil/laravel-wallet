@@ -13,18 +13,24 @@ use Anabil\Wallet\Exceptions\IdempotencyConflict;
 use Anabil\Wallet\Exceptions\ImmutableWallet;
 use Anabil\Wallet\Exceptions\InsufficientFunds;
 use Anabil\Wallet\Exceptions\InvalidAmount;
+use Anabil\Wallet\Exceptions\InvalidStatusTransition;
 use Anabil\Wallet\Exceptions\InvalidTransaction;
 use Anabil\Wallet\Exceptions\InvalidTransfer;
 use Anabil\Wallet\Exceptions\InvalidWalletAttribute;
+use Anabil\Wallet\Exceptions\WalletClosed;
 use Anabil\Wallet\Exceptions\WalletException;
+use Anabil\Wallet\Exceptions\WalletFrozen;
 use Anabil\Wallet\Ledger\Details;
 use Anabil\Wallet\Ledger\LedgerWriter;
+use Anabil\Wallet\Ledger\StatusWriter;
 use Anabil\Wallet\Support\Amount;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\Scales;
 use Anabil\Wallet\Support\WalletAttributes;
 use Anabil\Wallet\TransferResult;
 use BackedEnum;
+use Closure;
+use DateTimeInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
@@ -34,8 +40,8 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Config;
 
 /**
- * A holder's wallet. Its balance, holder, name, currency and scale can
- * never be changed through Eloquent, and it can never be deleted: the checks
+ * A holder's wallet. Its balance, holder, name, currency, scale and status
+ * can never be changed through Eloquent, and it can never be deleted: the checks
  * live in the model's persistence internals (performInsert / performUpdate /
  * performDeleteOnModel) and in WalletBuilder, not in model events, so they
  * also hold for saveQuietly(), createQuietly() and Model::withoutEvents().
@@ -51,6 +57,13 @@ use Illuminate\Support\Facades\Config;
  * is created and never changes, so the stored integers keep their meaning
  * whatever the config says later.
  *
+ * Status: a wallet is born active. freeze() stops money from leaving it
+ * (credits still land; a forced reversal may still debit it), unfreeze()
+ * makes it active again, and close() ends it for good once its balance is
+ * zero: a closed wallet takes no movement at all. The rules are enforced by
+ * the database row, inside the same guarded UPDATE that moves the money,
+ * never by this instance's (possibly stale) status.
+ *
  * @property int $id
  * @property string $holder_type
  * @property int|string $holder_id
@@ -59,7 +72,7 @@ use Illuminate\Support\Facades\Config;
  * @property int $scale
  * @property-read string $balance
  * @property string $min_balance
- * @property WalletStatus $status
+ * @property-read WalletStatus $status
  * @property array<array-key, mixed>|null $meta
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
@@ -67,12 +80,22 @@ use Illuminate\Support\Facades\Config;
 class Wallet extends Model
 {
     /**
-     * Columns that are fixed once the wallet exists. The primary key is
+     * Columns that are fixed once the wallet exists, or (status) only change
+     * through freeze(), unfreeze() and close(). The primary key is
      * protected as well (see protectedColumns()).
      *
      * @var list<string>
      */
-    public const PROTECTED_COLUMNS = ['balance', 'holder_type', 'holder_id', 'name', 'currency', 'scale'];
+    public const PROTECTED_COLUMNS = ['balance', 'holder_type', 'holder_id', 'name', 'currency', 'scale', 'status'];
+
+    /**
+     * Bookkeeping for undoing status changes when an enclosing transaction
+     * rolls back (see recordStatusChange()): the version of the current
+     * in-memory status, and the last version handed out.
+     */
+    private int $statusVersion = 0;
+
+    private int $statusVersions = 0;
 
     /**
      * Only harmless data is mass assignable. Holder, name, currency and scale
@@ -149,6 +172,7 @@ class Wallet extends Model
      * @throws InvalidAmount when the amount is not positive, malformed, too precise for the wallet's scale or too large
      * @throws InvalidTransaction when the type, details or idempotency key are invalid
      * @throws BalanceOverflow when the balance would overflow
+     * @throws WalletClosed when the wallet is closed
      * @throws IdempotencyConflict when the key was already used on this wallet for a different operation
      */
     public function deposit(
@@ -187,6 +211,8 @@ class Wallet extends Model
      * @throws InvalidAmount when the amount is not positive, malformed, too precise for the wallet's scale or too large
      * @throws InvalidTransaction when the type, details or idempotency key are invalid
      * @throws InsufficientFunds when the balance would drop below the minimum balance
+     * @throws WalletFrozen when the wallet is frozen
+     * @throws WalletClosed when the wallet is closed
      * @throws IdempotencyConflict when the key was already used on this wallet for a different operation
      */
     public function withdraw(
@@ -233,6 +259,8 @@ class Wallet extends Model
      * @throws InvalidTransfer when the recipient is this wallet or uses another currency, scale or connection
      * @throws InsufficientFunds when this wallet would drop below its minimum balance
      * @throws BalanceOverflow when the recipient's balance would overflow
+     * @throws WalletFrozen when this wallet is frozen (the recipient may be)
+     * @throws WalletClosed when either wallet is closed
      * @throws IdempotencyConflict when the key was already used on this wallet for a different operation
      */
     public function transferTo(
@@ -251,6 +279,149 @@ class Wallet extends Model
         $in = Details::internal(CoreType::TransferIn, $reference, $recipientDescription ?? $description, $meta, $performedBy);
 
         return (new LedgerWriter)->transfer($this, $recipient, $minor, $out, $in, $idempotencyKey);
+    }
+
+    /**
+     * Stop money from leaving the wallet: withdrawals, outgoing transfers
+     * and reversals that would debit it are refused with WalletFrozen
+     * (a reversal with force: true still goes through, e.g. a chargeback).
+     * Credits still land. A no-op, without an event, when the wallet is
+     * already frozen.
+     *
+     * The change is a single guarded UPDATE of the row, so it takes effect
+     * for every request at once: once it commits, no debit passes.
+     * WalletStatusChanged is dispatched after the commit.
+     *
+     * @param  string|null  $reason  at most 255 characters, carried by the event
+     *
+     * @throws InvalidStatusTransition when the wallet is closed, or the reason / actor are invalid
+     */
+    public function freeze(?string $reason = null, ?Model $performedBy = null): static
+    {
+        (new StatusWriter)->transition($this, WalletStatus::Frozen, $reason, $performedBy);
+
+        return $this;
+    }
+
+    /**
+     * Make a frozen wallet active again. A no-op, without an event, when it
+     * is already active. WalletStatusChanged is dispatched after the
+     * commit.
+     *
+     * @param  string|null  $reason  at most 255 characters, carried by the event
+     *
+     * @throws InvalidStatusTransition when the wallet is closed, or the reason / actor are invalid
+     */
+    public function unfreeze(?string $reason = null, ?Model $performedBy = null): static
+    {
+        (new StatusWriter)->transition($this, WalletStatus::Active, $reason, $performedBy);
+
+        return $this;
+    }
+
+    /**
+     * Close the wallet for good: no money moves on it again, in either
+     * direction, and it cannot be reopened. Only an empty wallet (a balance
+     * of exactly zero, checked against the database row by the UPDATE
+     * itself) can be closed, whether it is active or frozen. A no-op,
+     * without an event, when it is already closed. WalletStatusChanged is
+     * dispatched after the commit.
+     *
+     * @param  string|null  $reason  at most 255 characters, carried by the event
+     *
+     * @throws InvalidStatusTransition when the balance is not zero, or the reason / actor are invalid
+     */
+    public function close(?string $reason = null, ?Model $performedBy = null): static
+    {
+        (new StatusWriter)->transition($this, WalletStatus::Closed, $reason, $performedBy);
+
+        return $this;
+    }
+
+    /**
+     * Whether this instance says the wallet is active. Advisory only, like
+     * spendable(): the status may have changed since the instance was read,
+     * and the ledger checks the database row itself.
+     */
+    public function isActive(): bool
+    {
+        return $this->currentStatus() === WalletStatus::Active;
+    }
+
+    /**
+     * Whether this instance says the wallet is frozen. Advisory, like
+     * isActive().
+     */
+    public function isFrozen(): bool
+    {
+        return $this->currentStatus() === WalletStatus::Frozen;
+    }
+
+    /**
+     * Whether this instance says the wallet is closed. Advisory, like
+     * isActive().
+     */
+    public function isClosed(): bool
+    {
+        return $this->currentStatus() === WalletStatus::Closed;
+    }
+
+    /**
+     * Puts the stored status on the instance, clean.
+     *
+     * @internal used by StatusWriter
+     */
+    public function syncStatus(WalletStatus $status): void
+    {
+        $this->attributes['status'] = $status->value;
+        $this->syncOriginalAttributes('status');
+    }
+
+    /**
+     * Puts a committed status change (and its updated_at) on the instance,
+     * clean, and returns the closure that undoes it if the enclosing
+     * transaction rolls back.
+     *
+     * Every change gets a new version. An undo only applies while the
+     * instance is at or past its version, and steps it back to the version
+     * before it; so whatever order Laravel runs the rollback callbacks of
+     * several changes in, the instance ends up with the status it had
+     * before the earliest change rolled back.
+     *
+     * @return Closure(): void
+     *
+     * @internal used by StatusWriter
+     */
+    public function recordStatusChange(WalletStatus $from, WalletStatus $to, ?string $timestampColumn, DateTimeInterface $now): Closure
+    {
+        $previousVersion = $this->statusVersion;
+        $version = $this->statusVersion = ++$this->statusVersions;
+        $previousTimestamp = $timestampColumn === null ? null : ($this->attributes[$timestampColumn] ?? null);
+
+        $this->syncStatus($to);
+
+        if ($timestampColumn !== null) {
+            $this->setAttribute($timestampColumn, $this->fromDateTime($now));
+            $this->syncOriginalAttributes($timestampColumn);
+        }
+
+        return function () use ($from, $version, $previousVersion, $timestampColumn, $previousTimestamp, $now): void {
+            if ($this->statusVersion < $version) {
+                return;
+            }
+
+            $this->statusVersion = $previousVersion;
+            $this->syncStatus($from);
+
+            if ($timestampColumn !== null) {
+                $current = $this->getAttribute($timestampColumn);
+
+                if (! $current instanceof DateTimeInterface || $current >= $now) {
+                    $this->setAttribute($timestampColumn, $previousTimestamp);
+                    $this->syncOriginalAttributes($timestampColumn);
+                }
+            }
+        };
     }
 
     /**
@@ -556,6 +727,17 @@ class Wallet extends Model
     }
 
     /**
+     * The in-memory status, or null when the stored value is not a valid
+     * one (which only a manual edit of the table can produce).
+     */
+    private function currentStatus(): ?WalletStatus
+    {
+        $status = $this->attributes['status'] ?? null;
+
+        return is_string($status) ? WalletStatus::tryFrom($status) : null;
+    }
+
+    /**
      * A stored integer column as an int, whatever type the driver returned.
      */
     private static function rawMinor(mixed $value): int
@@ -570,6 +752,12 @@ class Wallet extends Model
     {
         if (array_key_exists('balance', $attributes) && ! in_array($attributes['balance'], [0, '0'], true)) {
             throw ImmutableWallet::mustStartEmpty();
+        }
+
+        if (array_key_exists('status', $attributes)
+            && $attributes['status'] !== WalletStatus::Active->value
+            && $attributes['status'] !== WalletStatus::Active) {
+            throw ImmutableWallet::mustStartActive();
         }
 
         if (isset($attributes['name']) && is_string($attributes['name'])) {

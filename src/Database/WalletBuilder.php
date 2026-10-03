@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Anabil\Wallet\Database;
 
+use Anabil\Wallet\Enums\WalletStatus;
 use Anabil\Wallet\Exceptions\ImmutableWallet;
 use Anabil\Wallet\Models\Wallet;
 use Illuminate\Contracts\Database\Query\Expression;
@@ -12,12 +13,15 @@ use Illuminate\Support\Str;
 
 /**
  * Query builder for wallets. Reads are untouched and harmless columns (meta,
- * status, timestamps) can still be updated in bulk, but any query-level
- * write to a protected column or to min_balance, any bulk insert/upsert and
- * any delete is refused. min_balance is refused because a query writes raw
- * minor units while the rest of the API speaks major units: change it with
- * $wallet->setMinBalance(). The model's own save() writes through the base
- * query builder (see Wallet::performUpdate()), so it is not affected.
+ * timestamps) can still be updated in bulk, but any query-level write to a
+ * protected column (status included) or to min_balance, any bulk
+ * insert/upsert and any delete is refused. min_balance is refused because
+ * a query writes raw minor units while the rest of the API speaks major
+ * units: change it with $wallet->setMinBalance(). The status only changes
+ * through $wallet->freeze(), unfreeze() and close(), whose guarded UPDATE
+ * keeps it consistent with the money (a closed wallet is always empty).
+ * The model's own save() writes through the base query builder (see
+ * Wallet::performUpdate()), so it is not affected.
  *
  * The insert* methods below would otherwise be forwarded by Eloquent's
  * __call() "passthru" straight to the base query builder, bypassing the
@@ -33,6 +37,36 @@ use Illuminate\Support\Str;
  */
 class WalletBuilder extends Builder
 {
+    /**
+     * Only active wallets.
+     *
+     * @return $this
+     */
+    public function active(): static
+    {
+        return $this->whereStatus(WalletStatus::Active);
+    }
+
+    /**
+     * Only frozen wallets.
+     *
+     * @return $this
+     */
+    public function frozen(): static
+    {
+        return $this->whereStatus(WalletStatus::Frozen);
+    }
+
+    /**
+     * Only closed wallets.
+     *
+     * @return $this
+     */
+    public function closed(): static
+    {
+        return $this->whereStatus(WalletStatus::Closed);
+    }
+
     /**
      * @param  array<string, mixed>  $values
      * @return int
@@ -206,6 +240,16 @@ class WalletBuilder extends Builder
     public function truncate(): never
     {
         throw ImmutableWallet::cannotBulkWrite('truncate');
+    }
+
+    /**
+     * @return $this
+     */
+    private function whereStatus(WalletStatus $status): static
+    {
+        $this->where($this->qualifyColumn('status'), $status->value);
+
+        return $this;
     }
 
     /**

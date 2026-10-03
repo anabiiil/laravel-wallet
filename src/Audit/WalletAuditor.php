@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Anabil\Wallet\Audit;
 
 use Anabil\Wallet\Enums\CoreType;
+use Anabil\Wallet\Enums\WalletStatus;
 use Anabil\Wallet\Support\Amount;
 use Anabil\Wallet\Support\Models;
 use Anabil\Wallet\Support\Scales;
@@ -20,12 +21,12 @@ use stdClass;
  * class is checking for.
  *
  * Per wallet (balance_mismatch, last_balance_after_mismatch, broken_chain,
- * below_floor, invalid_scale): wallets are processed in chunks of ids
+ * below_floor, invalid_scale, closed_with_balance, invalid_status): wallets are processed in chunks of ids
  * (default 500), lightest to heaviest. The id list itself is the only
  * thing ever held in full; everything else is read and discarded a chunk
  * at a time, so memory stays flat whatever the size of the tables.
  *
- * For each chunk, the balance/last-row/floor/scale checks come from a
+ * For each chunk, the balance/last-row/floor/scale/status checks come from a
  * single SQL statement (the wallets joined to a grouped aggregate of their
  * ledger rows and to their last row), so a concurrent write between two
  * separate reads can never manufacture a false positive: on MySQL InnoDB
@@ -140,7 +141,8 @@ final class WalletAuditor
 
     /**
      * The single consistent-read statement behind balance_mismatch,
-     * last_balance_after_mismatch, below_floor and invalid_scale: the
+     * last_balance_after_mismatch, below_floor, invalid_scale,
+     * closed_with_balance and invalid_status: the
      * wallets joined to a per-wallet aggregate of their ledger rows (sum,
      * count, highest id) and, through that highest id, to the row itself.
      *
@@ -166,6 +168,7 @@ final class WalletAuditor
                 'w.min_balance as min_balance',
                 'w.scale as scale',
                 'w.currency as currency',
+                'w.status as status',
                 $connection->raw('COALESCE(agg.sum_amount, 0) as sum_amount'),
                 $connection->raw('COALESCE(agg.row_count, 0) as row_count'),
                 'lastrow.balance_after as last_balance_after',
@@ -185,6 +188,8 @@ final class WalletAuditor
         $sumAmount = (int) $row->sum_amount;
         $rowCount = (int) $row->row_count;
         $lastBalanceAfter = $row->last_balance_after === null ? null : (int) $row->last_balance_after;
+        // Raw: a model would fail its enum cast on an invalid status.
+        $status = $row->status === null ? null : (string) $row->status;
 
         $issues = [];
 
@@ -244,6 +249,37 @@ final class WalletAuditor
                 transactionId: null,
                 message: sprintf('Wallet %d has scale %d, but only 2 or 3 are valid.', $walletId, $scale),
                 context: ['scale' => $scale],
+            );
+        }
+
+        if ($status === null || WalletStatus::tryFrom($status) === null) {
+            $issues[] = new Issue(
+                IssueCode::InvalidStatus,
+                walletId: $walletId,
+                groupUuid: null,
+                transactionId: null,
+                message: sprintf(
+                    'Wallet %d has status %s, but only %s are valid.',
+                    $walletId,
+                    $status === null ? 'NULL' : '['.$status.']',
+                    implode(', ', array_map(fn (WalletStatus $case): string => $case->value, WalletStatus::cases())),
+                ),
+                context: ['status' => $status],
+            );
+        }
+
+        if ($status === WalletStatus::Closed->value && $balance !== 0) {
+            $issues[] = new Issue(
+                IssueCode::ClosedWithBalance,
+                walletId: $walletId,
+                groupUuid: null,
+                transactionId: null,
+                message: sprintf(
+                    'Wallet %d is closed but its balance is %s: only an empty wallet can be closed.',
+                    $walletId,
+                    $this->money($balance, $scale, $currency),
+                ),
+                context: ['balance' => $balance],
             );
         }
 

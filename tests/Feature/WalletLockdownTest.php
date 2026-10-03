@@ -64,6 +64,8 @@ it('refuses to change protected attributes on the model', function (string $colu
     'currency' => ['currency', 'USD'],
     'id' => ['id', 999],
     'scale' => ['scale', 3],
+    'status' => ['status', 'frozen'],
+    'status enum' => ['status', WalletStatus::Closed],
 ])->with([
     'save' => fn (Wallet $w) => $w->save(),
     'saveQuietly' => fn (Wallet $w) => $w->saveQuietly(),
@@ -215,6 +217,13 @@ it('refuses query-level writes to protected columns', function (Closure $write):
     'decrementEach' => fn () => Wallet::query()->decrementEach(['balance' => 999]),
     'touch balance' => fn () => Wallet::query()->touch('balance'),
     'updateFrom' => fn () => Wallet::query()->updateFrom(['balance' => 999]),
+    'update status' => fn () => Wallet::query()->update(['status' => 'frozen']),
+    'update qualified status' => fn () => Wallet::query()->update(['wallets.status' => 'closed']),
+    'update status mixed with meta' => fn () => Wallet::query()->update(['meta' => '{}', 'status' => 'frozen']),
+    'relation update status' => fn () => test()->holder->wallets()->update(['status' => 'frozen']),
+    'updateFrom status' => fn () => Wallet::query()->updateFrom(['status' => 'frozen']),
+    'increment extra status' => fn () => Wallet::query()->increment('meta', 0, ['status' => 'frozen']),
+    'touch status' => fn () => Wallet::query()->touch('status'),
 ]);
 
 it('refuses query-level writes to min_balance, which would be raw minor units', function (Closure $write): void {
@@ -229,7 +238,7 @@ it('refuses query-level writes to min_balance, which would be raw minor units', 
     'updateFrom' => fn () => Wallet::query()->updateFrom(['min_balance' => -10]),
     'increment' => fn () => Wallet::query()->increment('min_balance', 3),
     'decrement' => fn () => Wallet::query()->decrement('min_balance', 3),
-    'increment extra' => fn () => Wallet::query()->increment('status', 0, ['min_balance' => -10]),
+    'increment extra' => fn () => Wallet::query()->increment('meta', 0, ['min_balance' => -10]),
     'incrementEach' => fn () => Wallet::query()->incrementEach(['min_balance' => 3]),
     'decrementEach' => fn () => Wallet::query()->decrementEach(['min_balance' => 3]),
     'touch' => fn () => Wallet::query()->touch('min_balance'),
@@ -335,14 +344,13 @@ it('refuses to delete wallets', function (Closure $delete): void {
 
 it('still allows query-level updates of harmless columns', function (): void {
     Wallet::query()->whereKey($this->wallet->id)->update(['meta' => json_encode(['a' => 1])]);
-    Wallet::query()->whereKey($this->wallet->id)->update(['wallets.status' => WalletStatus::Frozen->value]);
     $this->holder->wallets()->update(['meta->b' => 2]);
 
     $row = $this->walletRow($this->walletId);
 
     expect(json_decode((string) $row['meta'], true))->toBe(['a' => 1, 'b' => 2])
         ->and((int) $row['min_balance'])->toBe(0)
-        ->and($row['status'])->toBe('frozen')
+        ->and($row['status'])->toBe(WalletStatus::Active->value)
         ->and((int) $row['balance'])->toBe(0);
 });
 

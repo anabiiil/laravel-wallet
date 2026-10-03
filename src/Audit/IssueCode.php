@@ -72,6 +72,17 @@ enum IssueCode: string
     case ReversalWithoutLink = 'reversal_without_link';
 
     /**
+     * The wallet is closed but its balance is not zero: close() only ever
+     * closes an empty wallet, and no money moves on a closed one.
+     */
+    case ClosedWithBalance = 'closed_with_balance';
+
+    /**
+     * The wallet's status is not one of WalletStatus's values.
+     */
+    case InvalidStatus = 'invalid_status';
+
+    /**
      * Whether this code fails Report::passed() (Error) or is merely
      * informational (Warning).
      */

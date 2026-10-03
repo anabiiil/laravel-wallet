@@ -7,8 +7,9 @@ namespace Anabil\Wallet\Exceptions;
 use Anabil\Wallet\Models\Wallet;
 
 /**
- * Thrown when code tries to change a wallet's money state or identity
- * (balance, holder, name, currency, scale) or delete it through Eloquent.
+ * Thrown when code tries to change a wallet's money state, identity or
+ * status (balance, holder, name, currency, scale, status) or delete it
+ * through Eloquent.
  */
 class ImmutableWallet extends WalletException
 {
@@ -43,7 +44,7 @@ class ImmutableWallet extends WalletException
     public static function cannotDelete(Wallet $wallet): self
     {
         return new self(sprintf(
-            'Wallet [%s] cannot be deleted: its ledger must stay intact. Freeze or close it by changing its status instead.',
+            'Wallet [%s] cannot be deleted: its ledger must stay intact. Freeze it with $wallet->freeze() or close it with $wallet->close() instead.',
             (string) $wallet->getKey(),
         ));
     }
@@ -51,7 +52,7 @@ class ImmutableWallet extends WalletException
     public static function cannotBulkWrite(string $operation): self
     {
         return new self(sprintf(
-            'Wallets cannot be written with [%s]. Create wallets with $holder->wallet() or $holder->createWallet(), and change only meta and status on existing ones (min_balance through $wallet->setMinBalance()).',
+            'Wallets cannot be written with [%s]. Create wallets with $holder->wallet() or $holder->createWallet(), and change only meta on existing ones (min_balance through $wallet->setMinBalance(), the status through $wallet->freeze(), unfreeze() and close()).',
             $operation,
         ));
     }
@@ -63,10 +64,19 @@ class ImmutableWallet extends WalletException
         );
     }
 
+    public static function mustStartActive(): self
+    {
+        return new self(
+            'A wallet must be created active. Freeze or close it afterwards with $wallet->freeze() or $wallet->close().'
+        );
+    }
+
     private static function advice(string $column): string
     {
-        return $column === 'balance'
-            ? 'Balances only change by recording a ledger entry.'
-            : 'A wallet\'s holder, name, currency and scale are fixed at creation; create a new wallet instead.';
+        return match ($column) {
+            'balance' => 'Balances only change by recording a ledger entry.',
+            'status' => 'The status only changes through $wallet->freeze(), $wallet->unfreeze() and $wallet->close().',
+            default => 'A wallet\'s holder, name, currency and scale are fixed at creation; create a new wallet instead.',
+        };
     }
 }

@@ -20,6 +20,11 @@ use Anabil\Wallet\Models\WalletTransaction;
  * does not check the wallet's minimum balance (it still refuses to go past
  * the smallest storable balance). Only a forced reversal turns it off.
  *
+ * $bypassFreeze only matters for a debit: when true the guarded UPDATE also
+ * lets the debit through on a frozen wallet (a chargeback against a frozen
+ * merchant). Only a forced reversal sets it. A closed wallet refuses every
+ * leg whatever the flags.
+ *
  * $reverses is the entry this leg reverses: its id is stored in
  * reverses_id and its reference is copied onto the new entry.
  *
@@ -35,5 +40,6 @@ final readonly class Leg
         public ?string $idempotencyHash = null,
         public bool $enforceFloor = true,
         public ?WalletTransaction $reverses = null,
+        public bool $bypassFreeze = false,
     ) {}
 }

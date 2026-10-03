@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Anabil\Wallet\Ledger;
 
 use Anabil\Wallet\Enums\CoreType;
+use Anabil\Wallet\Enums\WalletStatus;
 use Anabil\Wallet\Events\TransactionRecorded;
 use Anabil\Wallet\Events\TransactionReversed;
 use Anabil\Wallet\Events\TransferCompleted;
@@ -15,7 +16,9 @@ use Anabil\Wallet\Exceptions\InvalidAmount;
 use Anabil\Wallet\Exceptions\InvalidReversal;
 use Anabil\Wallet\Exceptions\InvalidTransaction;
 use Anabil\Wallet\Exceptions\InvalidTransfer;
+use Anabil\Wallet\Exceptions\WalletClosed;
 use Anabil\Wallet\Exceptions\WalletException;
+use Anabil\Wallet\Exceptions\WalletFrozen;
 use Anabil\Wallet\Models\Wallet;
 use Anabil\Wallet\Models\WalletTransaction;
 use Anabil\Wallet\Support\Amount;
@@ -42,6 +45,14 @@ use Throwable;
  * makes the second re-evaluate against the committed balance). The wallet
  * instance's in-memory balance is never trusted; it is refreshed from the
  * database after the write.
+ *
+ * The wallet's status is checked by the same WHERE clause, against the row
+ * as it is in the database (never the instance's status): a debit needs an
+ * active wallet (a forced reversal may also debit a frozen one), a credit
+ * an active or frozen one, and a closed wallet takes nothing. A status
+ * change is a single UPDATE of the same row (see Wallet::freeze()), so it
+ * is serialised with the money UPDATEs by the row lock: once a freeze or
+ * close commits, no later debit (or movement) can pass.
  *
  * Lock order: the UPDATEs of a posting run in ascending wallet id order,
  * whatever the direction of the money, so two postings touching the same
@@ -115,6 +126,8 @@ final class LedgerWriter
      *
      * @throws InsufficientFunds when a debit would take the balance below the minimum balance
      * @throws BalanceOverflow when a credit would overflow the balance
+     * @throws WalletFrozen when a debit hits a frozen wallet
+     * @throws WalletClosed when the wallet is closed
      * @throws WalletException when the wallet is not saved or no longer exists
      * @throws InvalidTransaction when the idempotency key is invalid
      * @throws IdempotencyConflict when the idempotency key was already used on the wallet for a different operation
@@ -157,6 +170,8 @@ final class LedgerWriter
      * @throws InvalidTransfer when the wallets are the same or differ in currency, scale or connection
      * @throws InsufficientFunds when the sender would drop below its minimum balance
      * @throws BalanceOverflow when the recipient's balance would overflow
+     * @throws WalletFrozen when the sender is frozen
+     * @throws WalletClosed when either wallet is closed
      * @throws WalletException when a wallet is not saved or no longer exists
      * @throws InvalidTransaction when the idempotency key is invalid
      * @throws IdempotencyConflict when the key was already used on the sender for a different operation
@@ -216,14 +231,19 @@ final class LedgerWriter
      * reference. A transfer leg reverses the whole transfer: one new entry
      * per leg, sharing a new group uuid. Returns the reversal of $original.
      *
-     * The debit side respects the minimum balance unless $force is true;
-     * the overflow guards always apply. With a key, it is stored on the
+     * The debit side respects the minimum balance and needs an active
+     * wallet unless $force is true, which skips the floor and lets the
+     * debit through on a frozen wallet too (a chargeback); a closed wallet
+     * refuses either side whatever $force says. The overflow guards always
+     * apply. With a key, it is stored on the
      * reversal of the transfer_out leg for a transfer (the original
      * sender's wallet), on the only reversal entry otherwise.
      *
      * @throws InvalidReversal when the entry is unsaved, a reversal, already reversed, or a leg of an incomplete transfer
      * @throws InsufficientFunds when the debit side would drop below its minimum balance (and $force is false)
      * @throws BalanceOverflow when a balance would overflow
+     * @throws WalletFrozen when the debit side is frozen (and $force is false)
+     * @throws WalletClosed when either side is closed
      * @throws WalletException when a wallet cannot be found
      * @throws InvalidTransaction when the idempotency key is invalid
      * @throws IdempotencyConflict when the key was already used on that wallet for a different operation
@@ -268,6 +288,7 @@ final class LedgerWriter
                 ]),
                 enforceFloor: ! $force,
                 reverses: $entry,
+                bypassFreeze: $force,
             );
         }
 
@@ -276,6 +297,12 @@ final class LedgerWriter
         }
 
         if ($found = $this->findReversal($legs, $originals, lock: false)) {
+            // A keyed reversal may have committed between the key lookup
+            // above and this check: it is ours to replay, not a refusal.
+            if ($idempotencyKey !== null && ($existing = $this->findByKey($legs[0]->wallet, $idempotencyKey, lock: false))) {
+                return $this->replayReversal($legs, $originals, $called, $existing, lock: false);
+            }
+
             throw InvalidReversal::alreadyReversed($found[0], $found[1]);
         }
 
@@ -287,7 +314,7 @@ final class LedgerWriter
                 $transfer ? (string) Str::uuid7() : null,
                 $transfer ? self::TRANSFER_ATTEMPTS : 1,
             );
-        } catch (UniqueConstraintViolationException|InsufficientFunds|BalanceOverflow $e) {
+        } catch (UniqueConstraintViolationException|InsufficientFunds|BalanceOverflow|WalletFrozen|WalletClosed $e) {
             return $this->reversalWinner($legs, $originals, $called, $e);
         }
 
@@ -393,6 +420,13 @@ final class LedgerWriter
         $query = $this->walletRow($connection, $wallet);
         $grammar = $query->getGrammar();
 
+        // The status is part of every guard: see the class docblock.
+        if ($delta < 0) {
+            $query->whereIn('status', self::debitableStatuses($leg));
+        } else {
+            $query->whereIn('status', [WalletStatus::Active->value, WalletStatus::Frozen->value]);
+        }
+
         if ($delta < 0 && $leg->enforceFloor) {
             // The floor is checked by the UPDATE itself, against the row as
             // it is in the database.
@@ -416,7 +450,7 @@ final class LedgerWriter
         }
 
         if ($affected === 0) {
-            throw $this->refusal($connection, $wallet, $delta, $leg->enforceFloor);
+            throw $this->refusal($connection, $leg);
         }
 
         // The UPDATE above holds the row lock until commit, so this reads
@@ -830,7 +864,9 @@ final class LedgerWriter
      * the UPDATE before reaching the index). Everything was rolled back. A
      * keyed winner is replayed (or reported as a conflict); any other
      * reversal of these entries makes this one "already reversed".
-     * Otherwise the failure was genuine and is rethrown.
+     * Otherwise the failure was genuine and is rethrown: in particular a
+     * WalletFrozen / WalletClosed refusal only counts as a lost race when a
+     * reversal row actually exists, never on its own.
      *
      * @param  non-empty-list<Leg>  $legs
      * @param  non-empty-list<WalletTransaction>  $originals
@@ -842,7 +878,7 @@ final class LedgerWriter
         array $legs,
         array $originals,
         int $called,
-        UniqueConstraintViolationException|InsufficientFunds|BalanceOverflow $e,
+        UniqueConstraintViolationException|InsufficientFunds|BalanceOverflow|WalletFrozen|WalletClosed $e,
     ): WalletTransaction {
         $keyed = $legs[0];
 
@@ -964,14 +1000,51 @@ final class LedgerWriter
     }
 
     /**
-     * Explains why the guarded UPDATE matched no row.
+     * The statuses a debit leg may take money from: active only, or active
+     * and frozen for a forced reversal.
+     *
+     * @return list<string>
      */
-    private function refusal(Connection $connection, Wallet $wallet, int $delta, bool $enforceFloor): WalletException
+    private static function debitableStatuses(Leg $leg): array
     {
-        $row = $this->walletRow($connection, $wallet)->first(['balance', 'min_balance']);
+        return $leg->bypassFreeze
+            ? [WalletStatus::Active->value, WalletStatus::Frozen->value]
+            : [WalletStatus::Active->value];
+    }
+
+    /**
+     * Explains why the guarded UPDATE matched no row, from the row as it is
+     * now: a closed wallet first, then a frozen one (for a debit that may
+     * not touch it), then the money guards.
+     */
+    private function refusal(Connection $connection, Leg $leg): WalletException
+    {
+        $wallet = $leg->wallet;
+        $delta = $leg->delta;
+        $row = $this->walletRow($connection, $wallet)->first(['balance', 'min_balance', 'status']);
 
         if ($row === null) {
             return new WalletException(sprintf('Wallet [%s] no longer exists.', (string) $wallet->getKey()));
+        }
+
+        $status = (string) $row->status;
+
+        if ($status === WalletStatus::Closed->value) {
+            return WalletClosed::for($wallet, $delta);
+        }
+
+        $allowed = $delta < 0
+            ? self::debitableStatuses($leg)
+            : [WalletStatus::Active->value, WalletStatus::Frozen->value];
+
+        if (! in_array($status, $allowed, true)) {
+            return $status === WalletStatus::Frozen->value
+                ? WalletFrozen::forDebit($wallet, -$delta)
+                : new WalletException(sprintf(
+                    'Wallet [%s] has an invalid status [%s], so no money can move on it. Run wallet:check to inspect it.',
+                    (string) $wallet->getKey(),
+                    $status,
+                ));
         }
 
         $balance = (int) $row->balance;
@@ -980,7 +1053,7 @@ final class LedgerWriter
             return BalanceOverflow::for($wallet, $delta, $balance);
         }
 
-        return $enforceFloor
+        return $leg->enforceFloor
             ? InsufficientFunds::for($wallet, -$delta, $balance, (int) $row->min_balance)
             : BalanceOverflow::forDebit($wallet, -$delta, $balance);
     }

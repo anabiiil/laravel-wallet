@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Anabil\Wallet\Database\WalletBuilder;
 use Anabil\Wallet\Enums\WalletStatus;
+use Anabil\Wallet\Exceptions\ImmutableWallet;
 use Anabil\Wallet\Exceptions\WalletException;
 use Anabil\Wallet\Models\Wallet;
 use Anabil\Wallet\Models\WalletTransaction;
@@ -59,13 +60,20 @@ it('changes the minimum balance through setMinBalance()', function (): void {
         ->and((int) $this->walletRow($wallet->id)['min_balance'])->toBe(-25_00);
 });
 
-it('lets the status be changed', function (): void {
+it('changes the status only through freeze(), not through save()', function (): void {
     $wallet = User::create(['name' => 'Ada'])->wallet();
 
-    $wallet->status = WalletStatus::Frozen;
-    $wallet->save();
+    $wallet->forceFill(['status' => WalletStatus::Frozen]);
 
-    expect($this->walletRow($wallet->id)['status'])->toBe('frozen');
+    expect(fn () => $wallet->save())->toThrow(ImmutableWallet::class, 'freeze()')
+        ->and($this->walletRow($wallet->id)['status'])->toBe('active');
+
+    $wallet = Wallet::findOrFail($wallet->id);
+
+    expect($wallet->freeze())->toBe($wallet)
+        ->and($wallet->status)->toBe(WalletStatus::Frozen)
+        ->and($wallet->isDirty())->toBeFalse()
+        ->and($this->walletRow($wallet->id)['status'])->toBe('frozen');
 });
 
 it('registers the configured holders in the morph map', function (): void {
