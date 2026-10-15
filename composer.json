@@ -1,14 +1,16 @@
 {
-    "name": "anabil/wallet",
-    "description": "Race-safe wallets, balances and an immutable ledger for Laravel.",
+    "name": "anabil/laravel-wallet",
+    "description": "Race-safe Laravel wallets with an immutable ledger, multi-guard holders, transfers, reversals and exact decimal amounts.",
     "keywords": [
         "laravel",
         "wallet",
         "balance",
         "ledger",
-        "transactions"
+        "transactions",
+        "money",
+        "payments"
     ],
-    "homepage": "https://github.com/anabil/wallet",
+    "homepage": "https://github.com/anabiiil/laravel-wallet",
     "license": "MIT",
     "authors": [
         {
