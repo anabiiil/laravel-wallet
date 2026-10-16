@@ -103,12 +103,16 @@ it('replays a withdrawal even when the wallet can no longer cover it', function 
 });
 
 it('refuses to reuse a key for a different operation', function (string $change): void {
-    $order = Order::create();
+    // Forced to share the holder's key (ids are not reset between tests on
+    // MySQL/Postgres, so they would not coincide otherwise): the
+    // "reference morph type" dataset below swaps the reference for the
+    // holder, and must prove the fingerprint differs because of the
+    // reference's morph *type*, not merely because of a different id.
+    $order = Order::forceCreate(['id' => $this->user->getKey()]);
     $admin = Admin::create(['name' => 'Root']);
 
     $this->wallet->deposit(10, 'topup', reference: $order, description: 'Top up', meta: ['a' => 1], performedBy: $admin, idempotencyKey: 'k');
 
-    // The holder (users.id 1) has the same key as the order (orders.id 1).
     expect($this->user->getKey())->toBe($order->getKey());
 
     $snapshot = $this->transactionRows();

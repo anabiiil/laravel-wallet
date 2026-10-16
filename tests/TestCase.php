@@ -185,6 +185,38 @@ abstract class TestCase extends Orchestra
     }
 
     /**
+     * Runs $callback inside its own savepoint and asserts it throws
+     * $exceptionClass, returning the caught exception.
+     *
+     * On Postgres, a failed statement aborts the surrounding transaction
+     * (here, the one RefreshDatabase wraps every test in) until it is
+     * rolled back, so any later query in the same test would fail with
+     * "current transaction is aborted". Running the failing statement
+     * inside DB::transaction() makes it a SAVEPOINT instead (we are
+     * already inside a transaction), so only that inner savepoint rolls
+     * back and the outer transaction stays usable.
+     *
+     * @template TException of Throwable
+     *
+     * @param  class-string<TException>  $exceptionClass
+     * @return TException
+     */
+    protected function expectDatabaseError(Closure $callback, string $exceptionClass): Throwable
+    {
+        $caught = null;
+
+        try {
+            DB::transaction($callback);
+        } catch (Throwable $e) {
+            $caught = $e;
+        }
+
+        $this->assertInstanceOf($exceptionClass, $caught, $caught === null ? 'Nothing was thrown.' : $caught::class.': '.$caught->getMessage());
+
+        return $caught;
+    }
+
+    /**
      * The sum of a wallet's ledger amounts, read without the models.
      */
     protected function ledgerSum(int $walletId): int

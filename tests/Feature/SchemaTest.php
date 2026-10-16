@@ -152,8 +152,7 @@ it('has the expected named indexes on wallet_transactions', function (string $su
 it('prevents duplicate wallets for the same holder and name', function (): void {
     insertWallet(['name' => 'main']);
 
-    expect(fn () => insertWallet(['name' => 'main']))
-        ->toThrow(UniqueConstraintViolationException::class);
+    $this->expectDatabaseError(fn () => insertWallet(['name' => 'main']), UniqueConstraintViolationException::class);
 });
 
 it('allows the same holder to have wallets with different names', function (): void {
@@ -177,9 +176,9 @@ it('rejects duplicate idempotency keys on the same wallet', function (): void {
 
     DB::table(transactionsTable())->insert(transactionAttributes($walletId, ['idempotency_key' => 'abc']));
 
-    expect(fn () => DB::table(transactionsTable())->insert(
+    $this->expectDatabaseError(fn () => DB::table(transactionsTable())->insert(
         transactionAttributes($walletId, ['idempotency_key' => 'abc'])
-    ))->toThrow(UniqueConstraintViolationException::class);
+    ), UniqueConstraintViolationException::class);
 });
 
 it('allows the same idempotency key across different wallets', function (): void {
@@ -208,14 +207,13 @@ it('rejects two transactions reversing the same transaction', function (): void 
 
     DB::table(transactionsTable())->insert(transactionAttributes($walletId, ['reverses_id' => $originalId]));
 
-    expect(fn () => DB::table(transactionsTable())->insert(
+    $this->expectDatabaseError(fn () => DB::table(transactionsTable())->insert(
         transactionAttributes($walletId, ['reverses_id' => $originalId])
-    ))->toThrow(UniqueConstraintViolationException::class);
+    ), UniqueConstraintViolationException::class);
 });
 
 it('rejects a transaction referencing a non-existent wallet', function (): void {
-    expect(fn () => DB::table(transactionsTable())->insert(transactionAttributes(999_999)))
-        ->toThrow(QueryException::class);
+    $this->expectDatabaseError(fn () => DB::table(transactionsTable())->insert(transactionAttributes(999_999)), QueryException::class);
 });
 
 it('sets created_at automatically when omitted on insert', function (): void {

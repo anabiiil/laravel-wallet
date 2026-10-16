@@ -15,9 +15,19 @@ use Anabil\Wallet\Tests\Fixtures\User;
 use Illuminate\Database\Eloquent\Relations\Relation;
 
 it('reads its table name from config', function (): void {
-    config(['wallet.tables.wallets' => 'custom_wallets']);
+    // Restored in a finally: see TransactionLockdownTest's identical table
+    // name config test for why leaving this set would corrupt the schema
+    // Testbench rebuilds between tests (the wallets migration's down() also
+    // reads this config).
+    $original = config('wallet.tables.wallets');
 
-    expect((new Wallet)->getTable())->toBe('custom_wallets');
+    try {
+        config(['wallet.tables.wallets' => 'custom_wallets']);
+
+        expect((new Wallet)->getTable())->toBe('custom_wallets');
+    } finally {
+        config(['wallet.tables.wallets' => $original]);
+    }
 });
 
 it('uses the wallet builder', function (): void {

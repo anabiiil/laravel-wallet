@@ -28,11 +28,23 @@ beforeEach(function (): void {
 });
 
 it('reads its table name from config and uses the transaction builder', function (): void {
-    config(['wallet.tables.transactions' => 'custom_ledger']);
+    // Restored in a finally: this config also drives the down() of the
+    // wallet_transactions migration, run by Testbench when the schema is
+    // rebuilt for the next test. Left at 'custom_ledger', that down()
+    // would try to drop a table that doesn't exist (a silent no-op), the
+    // real wallet_transactions table would never be dropped, and the next
+    // attempt to drop wallets would fail on its lingering foreign key.
+    $original = config('wallet.tables.transactions');
 
-    expect((new WalletTransaction)->getTable())->toBe('custom_ledger')
-        ->and(WalletTransaction::query())->toBeInstanceOf(WalletTransactionBuilder::class)
-        ->and((new WalletTransaction)->getFillable())->toBe([]);
+    try {
+        config(['wallet.tables.transactions' => 'custom_ledger']);
+
+        expect((new WalletTransaction)->getTable())->toBe('custom_ledger')
+            ->and(WalletTransaction::query())->toBeInstanceOf(WalletTransactionBuilder::class)
+            ->and((new WalletTransaction)->getFillable())->toBe([]);
+    } finally {
+        config(['wallet.tables.transactions' => $original]);
+    }
 });
 
 it('casts its attributes and has no updated_at', function (): void {

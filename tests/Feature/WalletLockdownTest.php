@@ -50,6 +50,15 @@ it('throws for non-fillable attributes passed to update() in strict mode', funct
 });
 
 it('refuses to change protected attributes on the model', function (string $column, mixed $value, Closure $save): void {
+    // holder_id and id are derived from the wallet's current values
+    // (+1000) rather than hard-coded: ids are not reset between tests on
+    // MySQL/Postgres, so a fixed literal could coincidentally equal the
+    // real value, leaving the attribute clean (not dirty) and the guard
+    // never tripping.
+    if ($value instanceof Closure) {
+        $value = $value($this->wallet);
+    }
+
     $this->wallet->forceFill([$column => $value]);
 
     expect(fn () => $save($this->wallet))->toThrow(ImmutableWallet::class);
@@ -58,11 +67,11 @@ it('refuses to change protected attributes on the model', function (string $colu
 })->with([
     'balance' => ['balance', 999],
     'negative balance' => ['balance', -1],
-    'holder_id' => ['holder_id', 2],
+    'holder_id' => ['holder_id', fn (Wallet $w): int => (int) $w->holder_id + 1000],
     'holder_type' => ['holder_type', 'merchant'],
     'name' => ['name', 'renamed'],
     'currency' => ['currency', 'USD'],
-    'id' => ['id', 999],
+    'id' => ['id', fn (Wallet $w): int => $w->id + 1000],
     'scale' => ['scale', 3],
     'status' => ['status', 'frozen'],
     'status enum' => ['status', WalletStatus::Closed],
