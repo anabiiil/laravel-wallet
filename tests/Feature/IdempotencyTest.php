@@ -133,7 +133,9 @@ it('refuses to reuse a key for a different operation', function (string $change)
         'amount' => $args['amount'] = '10.01',
         'direction' => $method = 'withdraw',
         'type' => $args['type'] = 'bonus',
-        'reference model' => $args['reference'] = Order::create(),
+        // A forced id: on PostgreSQL forceCreate() above did not advance the
+        // orders sequence, so a plain create() could reuse the same id.
+        'reference model' => $args['reference'] = Order::forceCreate(['id' => $order->getKey() + 1000]),
         'reference morph type' => $args['reference'] = $this->user,
         'no reference' => $args['reference'] = null,
         'performedBy' => $args['performedBy'] = Admin::create(['name' => 'Other']),
